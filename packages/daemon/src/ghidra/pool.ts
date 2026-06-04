@@ -12,6 +12,7 @@ import {
   getWorkerJarPath,
   getMemoryLimit,
   getDaemonPort,
+  getDaemonUrl,
 } from '@ghidra-mcp/shared/platform';
 import type {
   WorkerCommand,
@@ -196,8 +197,8 @@ export class WorkerPool {
 
     const classpath = classpathParts.join(path.delimiter);
 
-    // Use 127.0.0.1 instead of localhost to avoid IPv4/IPv6 issues
-    const daemonUrl = `http://127.0.0.1:${daemonPort}`;
+    // Loopback by default (worker is co-located); GHIDRA_MCP_DAEMON_URL overrides
+    const daemonUrl = getDaemonUrl(daemonPort);
     console.log(`[WorkerPool] Spawning worker with daemon URL: ${daemonUrl}`);
 
     const args = [

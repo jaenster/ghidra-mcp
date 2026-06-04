@@ -314,6 +314,27 @@ export function getDaemonPort(): number {
   return DEFAULT_DAEMON_PORT;
 }
 
+/**
+ * Address the daemon HTTP server binds to.
+ * Defaults to loopback for local use; set GHIDRA_MCP_HOST=0.0.0.0 in a
+ * container/pod so an ingress or service can reach it.
+ */
+export function getDaemonHost(): string {
+  return process.env.GHIDRA_MCP_HOST?.trim() || '127.0.0.1';
+}
+
+/**
+ * Base URL a spawned worker uses to call back to the daemon's internal API.
+ * Workers are co-located with the daemon (child processes), so loopback is the
+ * default; GHIDRA_MCP_DAEMON_URL overrides it if the daemon is reached by a
+ * different host/DNS name.
+ */
+export function getDaemonUrl(port: number = getDaemonPort()): string {
+  const override = process.env.GHIDRA_MCP_DAEMON_URL?.trim();
+  if (override) return override.replace(/\/+$/, '');
+  return `http://127.0.0.1:${port}`;
+}
+
 // =============================================================================
 // Utility Functions
 // =============================================================================

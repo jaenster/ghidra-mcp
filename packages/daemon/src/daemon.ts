@@ -6,7 +6,7 @@ import * as fs from 'node:fs';
 import * as http from 'node:http';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { getAppPaths, ensureAppDirs, getDaemonPort } from '@ghidra-mcp/shared/platform';
+import { getAppPaths, ensureAppDirs, getDaemonPort, getDaemonHost } from '@ghidra-mcp/shared/platform';
 import { createServer } from './server.js';
 import { SessionManager } from './sessions/manager.js';
 import { WorkerPool } from './ghidra/pool.js';
@@ -82,9 +82,10 @@ export async function startDaemon(options?: {
     commandLog,
   });
 
-  // Start listening on 127.0.0.1 explicitly (avoid IPv4/IPv6 mismatch)
+  // Bind address: loopback locally, 0.0.0.0 in a container (GHIDRA_MCP_HOST)
+  const host = getDaemonHost();
   await new Promise<void>((resolve, reject) => {
-    server.listen(port, '127.0.0.1', () => {
+    server.listen(port, host, () => {
       resolve();
     });
     server.on('error', reject);
@@ -105,7 +106,7 @@ export async function startDaemon(options?: {
   const pid = process.pid;
   fs.writeFileSync(paths.pidFile, JSON.stringify({ pid, port, startTime: Date.now() }));
 
-  logger.info(`Daemon started on localhost:${port}`, { pid });
+  logger.info(`Daemon started on ${host}:${port}`, { pid });
 
   // Crash logging — write to tmp so it doesn't clutter persistent app data
   const crashLogDir = path.join(os.tmpdir(), 'ghidra-mcp');

@@ -9,6 +9,8 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { createMcpServer } from '@ghidra-mcp/mcp';
+import { getOAuthConfig, installOAuth } from './auth/oauth.js';
+import type { RequestHandler } from 'express';
 import type { SessionManager } from './sessions/manager.js';
 import type { WorkerPool } from './ghidra/pool.js';
 import type { StateDatabase } from './state/database.js';
@@ -46,6 +48,18 @@ export async function createServer(options: ServerOptions): Promise<{
   const app = express();
   // Increase body size limit for large responses (data types from big binaries like Diablo 2)
   app.use(express.json({ limit: '100mb' }));
+
+  // OAuth 2.1 authorization server (active only when GHIDRA_MCP_PUBLIC_URL +
+  // GHIDRA_MCP_AUTH_SECRET are set). Gates the MCP transports below; health,
+  // dashboard, and the internal worker API stay open (the latter must not be
+  // exposed by the ingress — only loopback / in-pod traffic reaches it).
+  const oauthConfig = getOAuthConfig();
+  const requireAuth: RequestHandler = oauthConfig.enabled
+    ? installOAuth(app, options.database, oauthConfig).requireAuth
+    : (_req, _res, next) => next();
+  if (oauthConfig.enabled && options.logger) {
+    options.logger.info('OAuth enabled for MCP endpoints', { issuer: oauthConfig.publicUrl });
+  }
 
   // Health check endpoint
   app.get('/health', (_req: Request, res: Response) => {
@@ -362,7 +376,7 @@ export async function createServer(options: ServerOptions): Promise<{
   }
 
   // MCP JSON-RPC endpoint (simpler alternative to SSE for clients/testing)
-  app.post('/mcp/rpc', async (req: Request, res: Response) => {
+  app.post('/mcp/rpc', requireAuth, async (req: Request, res: Response) => {
     const { jsonrpc, id, method, params } = req.body;
 
     if (jsonrpc !== '2.0') {
@@ -446,12 +460,12 @@ export async function createServer(options: ServerOptions): Promise<{
   };
 
   // Primary SSE paths
-  app.get('/sse', (req, res) => handleSseConnect(req, res, '/sse/messages'));
-  app.post('/sse/messages', handleSseMessage);
+  app.get('/sse', requireAuth, (req, res) => handleSseConnect(req, res, '/sse/messages'));
+  app.post('/sse/messages', requireAuth, handleSseMessage);
 
   // Backward-compatible SSE paths (Claude Code currently uses these)
-  app.get('/mcp/sse', (req, res) => handleSseConnect(req, res, '/mcp/sse/messages'));
-  app.post('/mcp/sse/messages', handleSseMessage);
+  app.get('/mcp/sse', requireAuth, (req, res) => handleSseConnect(req, res, '/mcp/sse/messages'));
+  app.post('/mcp/sse/messages', requireAuth, handleSseMessage);
 
   // =========================================================================
   // MCP Streamable HTTP transport (new) - at /mcp
@@ -508,9 +522,9 @@ export async function createServer(options: ServerOptions): Promise<{
     await transport.handleRequest(req, res, req.body);
   };
 
-  app.post('/mcp', handleStreamableRequest);
-  app.get('/mcp', handleStreamableRequest);
-  app.delete('/mcp', handleStreamableRequest);
+  app.post('/mcp', requireAuth, handleStreamableRequest);
+  app.get('/mcp', requireAuth, handleStreamableRequest);
+  app.delete('/mcp', requireAuth, handleStreamableRequest);
 
   // Create HTTP server
   const server = http.createServer(app);

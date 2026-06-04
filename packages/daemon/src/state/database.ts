@@ -264,6 +264,36 @@ export class StateDatabase {
       )
     `);
 
+    // OAuth 2.1 authorization-server state (clients via DCR, auth codes, tokens)
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS oauth_clients (
+        client_id TEXT PRIMARY KEY,
+        client_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      )
+    `);
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS oauth_codes (
+        code TEXT PRIMARY KEY,
+        client_id TEXT NOT NULL,
+        redirect_uri TEXT NOT NULL,
+        code_challenge TEXT NOT NULL,
+        scopes TEXT,
+        resource TEXT,
+        expires_at INTEGER NOT NULL
+      )
+    `);
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS oauth_tokens (
+        token TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        client_id TEXT NOT NULL,
+        scopes TEXT,
+        resource TEXT,
+        expires_at INTEGER
+      )
+    `);
+
     this.save();
   }
 
@@ -1256,6 +1286,123 @@ export class StateDatabase {
 
     const violations = this.getDependencyRun(row.run_id);
     return { runId: row.run_id, violations, createdAt: new Date(row.created_at) };
+  }
+
+  // =========================================================================
+  // OAuth 2.1 authorization-server state
+  // =========================================================================
+
+  saveOAuthClient(clientId: string, clientJson: string): void {
+    if (!this.db) throw new Error('Database not initialized');
+    this.db.run(
+      `INSERT OR REPLACE INTO oauth_clients (client_id, client_json, created_at) VALUES (?, ?, ?)`,
+      [clientId, clientJson, Date.now()]
+    );
+    this.save();
+  }
+
+  getOAuthClient(clientId: string): string | undefined {
+    if (!this.db) throw new Error('Database not initialized');
+    const stmt = this.db.prepare('SELECT client_json FROM oauth_clients WHERE client_id = ?');
+    stmt.bind([clientId]);
+    const json = stmt.step() ? (stmt.getAsObject().client_json as string) : undefined;
+    stmt.free();
+    return json;
+  }
+
+  saveAuthCode(code: {
+    code: string;
+    clientId: string;
+    redirectUri: string;
+    codeChallenge: string;
+    scopes: string;
+    resource: string | null;
+    expiresAt: number;
+  }): void {
+    if (!this.db) throw new Error('Database not initialized');
+    this.db.run(
+      `INSERT OR REPLACE INTO oauth_codes
+        (code, client_id, redirect_uri, code_challenge, scopes, resource, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [code.code, code.clientId, code.redirectUri, code.codeChallenge, code.scopes, code.resource, code.expiresAt]
+    );
+    this.save();
+  }
+
+  /** Read an auth code without consuming it (used for PKCE challenge lookup). */
+  getAuthCode(code: string): {
+    clientId: string;
+    redirectUri: string;
+    codeChallenge: string;
+    scopes: string;
+    resource: string | null;
+    expiresAt: number;
+  } | undefined {
+    if (!this.db) throw new Error('Database not initialized');
+    const stmt = this.db.prepare('SELECT * FROM oauth_codes WHERE code = ?');
+    stmt.bind([code]);
+    const row = stmt.step() ? (stmt.getAsObject() as Record<string, unknown>) : undefined;
+    stmt.free();
+    if (!row) return undefined;
+    return {
+      clientId: row.client_id as string,
+      redirectUri: row.redirect_uri as string,
+      codeChallenge: row.code_challenge as string,
+      scopes: (row.scopes as string) ?? '',
+      resource: (row.resource as string) ?? null,
+      expiresAt: row.expires_at as number,
+    };
+  }
+
+  deleteAuthCode(code: string): void {
+    if (!this.db) throw new Error('Database not initialized');
+    this.db.run('DELETE FROM oauth_codes WHERE code = ?', [code]);
+    this.save();
+  }
+
+  saveOAuthToken(token: {
+    token: string;
+    kind: 'access' | 'refresh';
+    clientId: string;
+    scopes: string;
+    resource: string | null;
+    expiresAt: number | null;
+  }): void {
+    if (!this.db) throw new Error('Database not initialized');
+    this.db.run(
+      `INSERT OR REPLACE INTO oauth_tokens (token, kind, client_id, scopes, resource, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [token.token, token.kind, token.clientId, token.scopes, token.resource, token.expiresAt]
+    );
+    this.save();
+  }
+
+  getOAuthToken(token: string): {
+    kind: 'access' | 'refresh';
+    clientId: string;
+    scopes: string;
+    resource: string | null;
+    expiresAt: number | null;
+  } | undefined {
+    if (!this.db) throw new Error('Database not initialized');
+    const stmt = this.db.prepare('SELECT * FROM oauth_tokens WHERE token = ?');
+    stmt.bind([token]);
+    const row = stmt.step() ? (stmt.getAsObject() as Record<string, unknown>) : undefined;
+    stmt.free();
+    if (!row) return undefined;
+    return {
+      kind: row.kind as 'access' | 'refresh',
+      clientId: row.client_id as string,
+      scopes: (row.scopes as string) ?? '',
+      resource: (row.resource as string) ?? null,
+      expiresAt: (row.expires_at as number) ?? null,
+    };
+  }
+
+  deleteOAuthToken(token: string): void {
+    if (!this.db) throw new Error('Database not initialized');
+    this.db.run('DELETE FROM oauth_tokens WHERE token = ?', [token]);
+    this.save();
   }
 
   // =========================================================================
