@@ -1,0 +1,608 @@
+package com.ghidramcp.operations;
+
+import com.ghidramcp.GhidraContext;
+import com.ghidramcp.GhidraEngine;
+import com.ghidramcp.logging.Logger;
+
+import ghidra.GhidraApplicationLayout;
+import ghidra.GhidraJarApplicationLayout;
+import ghidra.app.decompiler.DecompInterface;
+import ghidra.app.decompiler.DecompileOptions;
+import ghidra.app.util.importer.AutoImporter;
+import ghidra.app.util.importer.MessageLog;
+import ghidra.app.util.opinion.LoadResults;
+import ghidra.base.project.GhidraProject;
+import ghidra.framework.Application;
+import ghidra.framework.ApplicationConfiguration;
+import ghidra.framework.HeadlessGhidraApplicationConfiguration;
+import ghidra.framework.data.DefaultProjectData;
+import ghidra.framework.model.DomainFile;
+import ghidra.framework.model.DomainFolder;
+import ghidra.framework.model.Project;
+import ghidra.framework.model.ProjectData;
+import ghidra.framework.model.ProjectLocator;
+import ghidra.program.flatapi.FlatProgramAPI;
+import ghidra.program.model.listing.Program;
+import ghidra.program.model.mem.Memory;
+
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
+
+import java.io.File;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * Project lifecycle operations: load, open, save, close, and program info.
+ * Delegates all state storage to the shared GhidraContext.
+ */
+public class ProjectOps {
+    private final GhidraContext ctx;
+
+    public ProjectOps(GhidraContext ctx) {
+        this.ctx = ctx;
+    }
+
+    // ============== Static initialization ==============
+
+    /**
+     * Initialize the Ghidra application framework (once per JVM).
+     * Safe to call multiple times - no-ops if already initialized.
+     */
+    public static void initializeGhidra() throws Exception {
+        if (!Application.isInitialized()) {
+            ApplicationConfiguration config = new HeadlessGhidraApplicationConfiguration();
+
+            // Try different layout strategies
+            GhidraApplicationLayout layout;
+            try {
+                // First try jar layout (when running from JAR)
+                layout = new GhidraJarApplicationLayout();
+            } catch (Exception e) {
+                // Fall back to standard layout
+                File ghidraDir = new File(System.getenv("GHIDRA_HOME"));
+                layout = new GhidraApplicationLayout(ghidraDir);
+            }
+
+            Application.initializeApplication(layout, config);
+        }
+    }
+
+    // ============== Load / Open ==============
+
+    /**
+     * Load a program for analysis (imports a binary into a new project).
+     */
+    public void loadProgram(File binaryFile, boolean analyze, int analysisTimeout) throws Exception {
+        Logger log = ctx.getLog();
+
+        // Create project directory
+        File projectDir = new File(ctx.getProjectPath());
+        if (!projectDir.exists()) {
+            projectDir.mkdirs();
+        }
+
+        // Create or open project
+        String projectName = "analysis";
+        GhidraProject project = GhidraProject.createProject(ctx.getProjectPath(), projectName, false);
+        ctx.setProject(project);
+
+        // Import the binary
+        MessageLog msgLog = new MessageLog();
+        LoadResults<Program> loadResults = AutoImporter.importByUsingBestGuess(
+                binaryFile, project.getProject(), "/", ctx, msgLog, ctx.getMonitor());
+
+        if (loadResults == null || loadResults.getPrimaryDomainObject() == null) {
+            throw new IOException("Failed to import binary: " + msgLog.toString());
+        }
+        Program program = loadResults.getPrimaryDomainObject();
+        ctx.setProgram(program);
+
+        // Initialize flat API
+        ctx.setFlatApi(new FlatProgramAPI(program));
+
+        // Run analysis if requested
+        if (analyze) {
+            runAnalysis();
+        }
+
+        // Initialize decompiler
+        initializeDecompiler();
+    }
+
+    /**
+     * Open an existing Ghidra project (.gpr file).
+     * If programPath is null: auto-select if only one program, error-list if multiple.
+     * If programPath is specified: load that specific program.
+     */
+    public void openProject(File gprFile) throws Exception {
+        openProject(gprFile, null);
+    }
+
+    /**
+     * Open an existing Ghidra project (.gpr file) with optional program path.
+     */
+    public void openProject(File gprFile, String programPath) throws Exception {
+        Logger log = ctx.getLog();
+        log.info("Opening existing project: " + gprFile.getAbsolutePath());
+
+        String gprPath = gprFile.getAbsolutePath();
+        if (!gprPath.endsWith(".gpr")) {
+            throw new IOException("Not a Ghidra project file: " + gprPath);
+        }
+
+        File projectDir = gprFile.getParentFile();
+        String projectName = gprFile.getName().replace(".gpr", "");
+
+        GhidraProject project;
+        try {
+            project = GhidraProject.openProject(projectDir.getAbsolutePath(), projectName);
+        } catch (Exception e) {
+            // Check if this is a stale lock from a dead worker
+            File lockFile = new File(projectDir, projectName + ".lock");
+            if (lockFile.exists()) {
+                log.warn("Project open failed, removing stale lock file: " + lockFile.getAbsolutePath());
+                lockFile.delete();
+                project = GhidraProject.openProject(projectDir.getAbsolutePath(), projectName);
+            } else {
+                throw e;
+            }
+        }
+        ctx.setProject(project);
+
+        Project ghidraProject = project.getProject();
+        DomainFolder rootFolder = ghidraProject.getProjectData().getRootFolder();
+
+        DomainFile programFile;
+        if (programPath == null) {
+            // Auto-select: find all programs
+            List<DomainFile> allPrograms = findAllPrograms(rootFolder);
+            if (allPrograms.isEmpty()) {
+                throw new IOException("No program found in project. Project may be empty.");
+            }
+            if (allPrograms.size() == 1) {
+                programFile = allPrograms.get(0);
+            } else {
+                StringBuilder sb = new StringBuilder("Multiple programs in project. Specify programPath. Available:\n");
+                for (DomainFile df : allPrograms) {
+                    sb.append("  ").append(df.getPathname()).append("\n");
+                }
+                throw new IOException(sb.toString().trim());
+            }
+        } else {
+            programFile = findProgramByPath(rootFolder, programPath);
+            if (programFile == null) {
+                throw new IOException("Program not found: " + programPath);
+            }
+        }
+
+        log.info("Loading program: " + programFile.getName() + " from path: " + programFile.getPathname());
+        Program program = (Program) programFile.getDomainObject(ctx, true, false, ctx.getMonitor());
+        ctx.setProgram(program);
+        ctx.setFlatApi(new FlatProgramAPI(program));
+        initializeDecompiler();
+
+        // Register in multi-program maps
+        ctx.registerProgram(programFile.getPathname(), program, ctx.getFlatApi(), ctx.getDecompiler());
+
+        log.info("Project opened successfully");
+    }
+
+    /**
+     * Open an existing Ghidra project in read-only mode.
+     * This does NOT acquire an exclusive project lock, allowing concurrent access
+     * with other Ghidra instances (e.g. the GUI or another MCP session).
+     *
+     * Note: GhidraProject.openProject(dir, name, true) does NOT actually propagate the
+     * readOnly flag to DefaultProjectData, so it still tries to lock.  We bypass
+     * GhidraProject entirely and use DefaultProjectData(locator, false, false) which
+     * opens the project file system without acquiring the write lock.
+     */
+    public void openProjectReadOnly(File gprFile) throws Exception {
+        openProjectReadOnly(gprFile, null);
+    }
+
+    public void openProjectReadOnly(File gprFile, String programPath) throws Exception {
+        Logger log = ctx.getLog();
+        log.info("Opening project read-only: " + gprFile.getAbsolutePath());
+        ctx.setReadOnly(true);
+
+        String gprPath = gprFile.getAbsolutePath();
+        if (!gprPath.endsWith(".gpr")) {
+            throw new IOException("Not a Ghidra project file: " + gprPath);
+        }
+
+        File projectDir = gprFile.getParentFile();
+        String projectName = gprFile.getName().replace(".gpr", "");
+
+        ProjectLocator locator = new ProjectLocator(projectDir.getAbsolutePath(), projectName);
+        ProjectData projectData = new DefaultProjectData(locator, false, false);
+        ctx.setProjectData(projectData);
+
+        DomainFolder rootFolder = projectData.getRootFolder();
+
+        DomainFile programFile;
+        if (programPath == null) {
+            List<DomainFile> allPrograms = findAllPrograms(rootFolder);
+            if (allPrograms.isEmpty()) {
+                throw new IOException("No program found in project. Project may be empty.");
+            }
+            if (allPrograms.size() == 1) {
+                programFile = allPrograms.get(0);
+            } else {
+                StringBuilder sb = new StringBuilder("Multiple programs in project. Specify programPath. Available:\n");
+                for (DomainFile df : allPrograms) {
+                    sb.append("  ").append(df.getPathname()).append("\n");
+                }
+                throw new IOException(sb.toString().trim());
+            }
+        } else {
+            programFile = findProgramByPath(rootFolder, programPath);
+            if (programFile == null) {
+                throw new IOException("Program not found: " + programPath);
+            }
+        }
+
+        log.info("Loading program read-only: " + programFile.getName() + " from path: " + programFile.getPathname());
+        Program program = (Program) programFile.getReadOnlyDomainObject(ctx, DomainFile.DEFAULT_VERSION, ctx.getMonitor());
+        ctx.setProgram(program);
+        ctx.setFlatApi(new FlatProgramAPI(program));
+        initializeDecompiler();
+
+        ctx.registerProgram(programFile.getPathname(), program, ctx.getFlatApi(), ctx.getDecompiler());
+
+        log.info("Project opened read-only successfully");
+    }
+
+    // ============== Save / Close ==============
+
+    /**
+     * Save the current program and project.
+     * Ends any orphaned transactions before saving.
+     */
+    public void save() throws Exception {
+        GhidraProject project = ctx.getProject();
+
+        if (project == null) {
+            throw new IllegalStateException("No project loaded");
+        }
+
+        // Clean up any orphaned transactions on active program
+        ctx.cleanupOrphanedTransactions("pre-save");
+
+        // Save all loaded programs
+        java.util.Map<String, Program> programs = ctx.getPrograms();
+        if (programs.isEmpty()) {
+            // Fallback: save single program (backward compat)
+            Program program = ctx.getProgram();
+            if (program != null) {
+                ctx.getLog().info("Saving program...");
+                project.save(program);
+            }
+        } else {
+            ctx.getLog().info("Saving " + programs.size() + " program(s)...");
+            for (java.util.Map.Entry<String, Program> entry : programs.entrySet()) {
+                Program p = entry.getValue();
+                if (p.isChanged()) {
+                    ctx.getLog().info("Saving: " + entry.getKey());
+                    project.save(p);
+                }
+            }
+        }
+        ctx.getLog().info("Save complete");
+    }
+
+    /**
+     * Close the engine, optionally saving first.
+     */
+    public void close(boolean save) {
+        Logger log = ctx.getLog();
+        GhidraProject project = ctx.getProject();
+        ProjectData projectData = ctx.getProjectData();
+
+        // Shut down decompiler pools first
+        for (com.ghidramcp.DecompilerPool pool : ctx.getDecompPools().values()) {
+            pool.shutdown();
+        }
+        ctx.getDecompPools().clear();
+
+        // Close all loaded programs (multi-program maps)
+        java.util.Map<String, Program> programs = ctx.getPrograms();
+        if (!programs.isEmpty()) {
+            for (java.util.Map.Entry<String, Program> entry : programs.entrySet()) {
+                String progPath = entry.getKey();
+                Program prog = entry.getValue();
+                DecompInterface decomp = ctx.getDecompilers().get(progPath);
+
+                if (decomp != null) {
+                    decomp.dispose();
+                }
+
+                try {
+                    if (save && !ctx.isReadOnly() && project != null && !prog.isClosed()) {
+                        try {
+                            project.save(prog);
+                        } catch (Exception e) {
+                            log.error("Error saving program " + progPath + ": " + e.getMessage());
+                        }
+                    }
+                    if (!prog.isClosed()) {
+                        prog.release(ctx);
+                    }
+                } catch (Exception e) {
+                    log.warn("Error during program release for " + progPath + ": " + e.getMessage());
+                }
+            }
+            programs.clear();
+            ctx.getDecompilers().clear();
+            ctx.getFlatApis().clear();
+        } else {
+            // Fallback: single-program close (backward compat)
+            DecompInterface decompiler = ctx.getDecompiler();
+            Program program = ctx.getProgram();
+
+            if (decompiler != null) {
+                decompiler.dispose();
+                ctx.setDecompiler(null);
+            }
+
+            if (program != null) {
+                try {
+                    if (save && !ctx.isReadOnly() && project != null && !program.isClosed()) {
+                        try {
+                            project.save(program);
+                        } catch (Exception e) {
+                            log.error("Error saving program: " + e.getMessage());
+                        }
+                    }
+                    if (!program.isClosed()) {
+                        program.release(ctx);
+                    }
+                } catch (Exception e) {
+                    log.warn("Error during program release (may be expected): " + e.getMessage());
+                }
+            }
+        }
+
+        ctx.setProgram(null);
+        ctx.setDecompiler(null);
+        ctx.setFlatApi(null);
+
+        if (project != null) {
+            try {
+                project.close();
+            } catch (Exception e) {
+                log.warn("Error closing project: " + e.getMessage());
+            }
+            ctx.setProject(null);
+        }
+
+        if (projectData != null) {
+            try {
+                projectData.close();
+            } catch (Exception e) {
+                log.warn("Error closing project data: " + e.getMessage());
+            }
+            ctx.setProjectData(null);
+        }
+    }
+
+    // ============== Info ==============
+
+    /**
+     * Get program information.
+     */
+    public GhidraEngine.ProgramInfo getProgramInfo() {
+        Program program = ctx.getProgram();
+
+        GhidraEngine.ProgramInfo info = new GhidraEngine.ProgramInfo();
+        info.name = program.getName();
+        info.path = program.getExecutablePath();
+        info.format = program.getExecutableFormat();
+        info.languageId = program.getLanguageID().toString();
+        info.compiler = program.getCompiler();
+
+        Memory mem = program.getMemory();
+        info.imageBase = program.getImageBase().toString();
+        info.minAddress = mem.getMinAddress().toString();
+        info.maxAddress = mem.getMaxAddress().toString();
+
+        info.endianness = program.getLanguage().isBigEndian() ? "big" : "little";
+        info.pointerSize = program.getDefaultPointerSize();
+
+        return info;
+    }
+
+    /**
+     * Check if this engine was opened in read-only mode.
+     */
+    public boolean isReadOnly() {
+        return ctx.isReadOnly();
+    }
+
+    // ============== Multi-program operations ==============
+
+    /**
+     * Load an additional program from the already-open project.
+     * The project must already be open (via openProject).
+     */
+    public void loadAdditionalProgram(String programPath) throws Exception {
+        Logger log = ctx.getLog();
+        GhidraProject project = ctx.getProject();
+
+        if (project == null) {
+            throw new IllegalStateException("No project open");
+        }
+
+        // Check if already loaded
+        if (ctx.getPrograms().containsKey(programPath)) {
+            log.info("Program already loaded: " + programPath);
+            ctx.switchProgram(programPath);
+            return;
+        }
+
+        Project ghidraProject = project.getProject();
+        DomainFolder rootFolder = ghidraProject.getProjectData().getRootFolder();
+        DomainFile programFile = findProgramByPath(rootFolder, programPath);
+
+        if (programFile == null) {
+            throw new IOException("Program not found: " + programPath);
+        }
+
+        log.info("Loading additional program: " + programFile.getPathname());
+        Program program;
+        if (ctx.isReadOnly()) {
+            program = (Program) programFile.getReadOnlyDomainObject(ctx, DomainFile.DEFAULT_VERSION, ctx.getMonitor());
+        } else {
+            program = (Program) programFile.getDomainObject(ctx, true, false, ctx.getMonitor());
+        }
+
+        FlatProgramAPI flatApi = new FlatProgramAPI(program);
+
+        // Initialize decompiler for this program
+        DecompInterface decompiler = createDecompiler(program);
+
+        ctx.registerProgram(programFile.getPathname(), program, flatApi, decompiler);
+        log.info("Additional program loaded: " + programFile.getPathname());
+    }
+
+    /**
+     * List all programs in the open project.
+     */
+    public JsonArray listProjectPrograms() throws Exception {
+        JsonArray result = new JsonArray();
+
+        DomainFolder rootFolder;
+        if (ctx.getProject() != null) {
+            rootFolder = ctx.getProject().getProject().getProjectData().getRootFolder();
+        } else if (ctx.getProjectData() != null) {
+            rootFolder = ctx.getProjectData().getRootFolder();
+        } else {
+            throw new IllegalStateException("No project open");
+        }
+
+        List<DomainFile> allPrograms = findAllPrograms(rootFolder);
+        java.util.Map<String, Program> loaded = ctx.getPrograms();
+
+        for (DomainFile df : allPrograms) {
+            JsonObject entry = new JsonObject();
+            entry.addProperty("name", df.getName());
+            entry.addProperty("path", df.getPathname());
+            entry.addProperty("loaded", loaded.containsKey(df.getPathname()));
+            result.add(entry);
+        }
+
+        return result;
+    }
+
+    /**
+     * Switch the active program context.
+     */
+    public void switchProgram(String programPath) {
+        ctx.switchProgram(programPath);
+    }
+
+    // ============== Private helpers ==============
+
+    /**
+     * Recursively collect all Program files in a DomainFolder.
+     */
+    private List<DomainFile> findAllPrograms(DomainFolder folder) throws IOException {
+        List<DomainFile> result = new ArrayList<>();
+        collectPrograms(folder, result);
+        return result;
+    }
+
+    private void collectPrograms(DomainFolder folder, List<DomainFile> result) throws IOException {
+        for (DomainFile df : folder.getFiles()) {
+            if (Program.class.isAssignableFrom(df.getDomainObjectClass())) {
+                result.add(df);
+            }
+        }
+        for (DomainFolder sub : folder.getFolders()) {
+            collectPrograms(sub, result);
+        }
+    }
+
+    /**
+     * Find a program by its pathname in the project.
+     */
+    private DomainFile findProgramByPath(DomainFolder rootFolder, String programPath) throws IOException {
+        List<DomainFile> all = findAllPrograms(rootFolder);
+        for (DomainFile df : all) {
+            if (df.getPathname().equals(programPath)) {
+                return df;
+            }
+            // Also match by name only (for convenience)
+            if (df.getName().equals(programPath)) {
+                return df;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Recursively search for the first Program in a DomainFolder.
+     */
+    private DomainFile findFirstProgram(DomainFolder folder) throws IOException {
+        // First, check files in this folder
+        DomainFile[] files = folder.getFiles();
+
+        for (DomainFile df : files) {
+            if (Program.class.isAssignableFrom(df.getDomainObjectClass())) {
+                return df;
+            }
+        }
+
+        // Then, recursively search subfolders
+        DomainFolder[] subfolders = folder.getFolders();
+
+        for (DomainFolder subfolder : subfolders) {
+            DomainFile found = findFirstProgram(subfolder);
+            if (found != null) {
+                return found;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Run auto-analysis on the current program.
+     */
+    private void runAnalysis() {
+        Logger log = ctx.getLog();
+        Program program = ctx.getProgram();
+
+        log.info("Running auto-analysis...");
+        int txId = program.startTransaction("Auto-analysis");
+        try {
+            ghidra.app.plugin.core.analysis.AutoAnalysisManager mgr =
+                ghidra.app.plugin.core.analysis.AutoAnalysisManager.getAnalysisManager(program);
+            mgr.initializeOptions();
+            mgr.reAnalyzeAll(null);
+            mgr.startAnalysis(ctx.getMonitor());
+            program.endTransaction(txId, true);
+            log.info("Analysis complete");
+        } catch (Exception e) {
+            program.endTransaction(txId, false);
+            log.error("Analysis failed: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+
+    /**
+     * Create a decompiler for a specific program (reusable for multi-program).
+     */
+    private DecompInterface createDecompiler(Program program) {
+        return com.ghidramcp.DecompilerPool.createDecompiler(program);
+    }
+
+    /**
+     * Initialize the decompiler for the active program.
+     */
+    private void initializeDecompiler() {
+        ctx.setDecompiler(createDecompiler(ctx.getProgram()));
+    }
+}

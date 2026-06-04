@@ -1,0 +1,666 @@
+/**
+ * Ghidra worker process pool
+ */
+
+import * as child_process from 'node:child_process';
+import * as path from 'node:path';
+import * as fs from 'node:fs';
+import * as crypto from 'node:crypto';
+import {
+  getGhidraPaths,
+  getJavaExecutable,
+  getWorkerJarPath,
+  getMemoryLimit,
+  getDaemonPort,
+} from '@ghidra-mcp/shared/platform';
+import type {
+  WorkerCommand,
+  WorkerResponse,
+  WorkerRegistration,
+  WorkerHeartbeat,
+  WORKER_STARTUP_TIMEOUT,
+  DEFAULT_COMMAND_TIMEOUT,
+} from '@ghidra-mcp/shared/protocol';
+import { createLogger } from '../logging/logger.js';
+import type { LogStore } from '../logging/store.js';
+import type { Logger } from '../logging/logger.js';
+
+interface WorkerState {
+  id: string;
+  sessionId: string;
+  process: child_process.ChildProcess | null;  // null for adopted (reconnected) workers
+  status: 'starting' | 'idle' | 'busy' | 'stopping' | 'stopped';
+  pid?: number;
+  startTime: number;
+  lastHeartbeat?: number;
+  activeCommands: number;
+  memoryUsed?: number;
+  memorySamples: number[];  // ring buffer of last 60 memory samples for sparkline
+  pendingCommands: Map<string, PendingCommand>;
+  commandQueue: WorkerCommand[];
+  commandCallbacks: Array<(cmd: WorkerCommand) => void>;
+  threads?: {
+    readPoolSize: number;
+    readPoolActive: number;
+    activeThreads: string[];
+    currentCommands: Record<string, string>;
+  };
+}
+
+interface PendingCommand {
+  command: WorkerCommand;
+  resolve: (response: WorkerResponse) => void;
+  reject: (error: Error) => void;
+  timeout: NodeJS.Timeout;
+}
+
+interface SpawnOptions {
+  binaryPath: string;
+  projectPath: string;
+  programPath?: string;
+  autoAnalyze?: boolean;
+  analysisTimeout?: number;
+  readOnly?: boolean;
+}
+
+const WORKER_STARTUP_TIMEOUT_MS = 60000;
+const DEFAULT_COMMAND_TIMEOUT_MS = 120000; // 2 minutes — list commands on large binaries can be slow
+
+export interface WorkerPoolOptions {
+  maxWorkers?: number;
+  logStore?: LogStore;
+}
+
+export class WorkerPool {
+  private workers = new Map<string, WorkerState>();
+  private maxWorkers = 10;
+  private log: Logger | null = null;
+  private onWorkerExitCallback?: (workerId: string, sessionId: string, code: number | null, signal: string | null) => void;
+  private stalenessTimer: NodeJS.Timeout;
+
+  constructor(options: WorkerPoolOptions = {}) {
+    this.maxWorkers = options.maxWorkers ?? 10;
+    if (options.logStore) {
+      this.log = createLogger(options.logStore, 'WorkerPool');
+    }
+    // Check adopted workers for heartbeat staleness every 30s
+    this.stalenessTimer = setInterval(() => this.checkHeartbeatStaleness(), 30000);
+    this.stalenessTimer.unref(); // don't keep process alive just for this
+  }
+
+  /**
+   * Check adopted workers for stale heartbeats (no heartbeat in 60s)
+   */
+  private checkHeartbeatStaleness(): void {
+    const now = Date.now();
+    for (const [workerId, state] of this.workers) {
+      // Only check adopted workers (process === null) that are still active
+      if (state.process === null && state.status !== 'stopped' && state.status !== 'stopping') {
+        if (state.lastHeartbeat && now - state.lastHeartbeat > 60000) {
+          console.log(`[WorkerPool] Adopted worker ${workerId} heartbeat stale (>${Math.round((now - state.lastHeartbeat) / 1000)}s)`);
+          state.status = 'stopped';
+          for (const pending of state.pendingCommands.values()) {
+            clearTimeout(pending.timeout);
+            pending.reject(new Error('Worker heartbeat stale'));
+          }
+          state.pendingCommands.clear();
+          this.workers.delete(workerId);
+          this.onWorkerExitCallback?.(workerId, state.sessionId, null, null);
+        }
+      }
+    }
+  }
+
+  /**
+   * Set callback for when a worker process exits unexpectedly
+   */
+  setOnWorkerExit(cb: (workerId: string, sessionId: string, code: number | null, signal: string | null) => void): void {
+    this.onWorkerExitCallback = cb;
+  }
+
+  /**
+   * Spawn a new worker for a session
+   */
+  async spawnWorker(sessionId: string, options: SpawnOptions): Promise<string> {
+    if (this.workers.size >= this.maxWorkers) {
+      throw new Error(`Maximum worker limit reached (${this.maxWorkers})`);
+    }
+
+    const workerId = crypto.randomUUID();
+    const ghidraPaths = getGhidraPaths();
+    const javaPath = getJavaExecutable();
+    const workerJarPath = getWorkerJarPath();
+    const daemonPort = getDaemonPort();
+    const memoryLimit = getMemoryLimit();
+
+    // Build classpath from Ghidra JARs
+    // We need to include ALL modules since Ghidra has complex interdependencies
+    const classpathParts = [workerJarPath];
+
+    // Add ALL Framework modules
+    const frameworkDir = path.join(ghidraPaths.ghidraHome, 'Ghidra', 'Framework');
+    try {
+      const frameworkModules = fs.readdirSync(frameworkDir);
+      for (const mod of frameworkModules) {
+        const libDir = path.join(frameworkDir, mod, 'lib');
+        if (fs.existsSync(libDir)) {
+          classpathParts.push(path.join(libDir, '*'));
+        }
+      }
+    } catch {
+      // Fallback to hardcoded list if directory listing fails
+      const modules = ['Utility', 'Generic', 'DB', 'FileSystem', 'Project', 'SoftwareModeling',
+                       'Graph', 'Docking', 'Decompiler', 'Emulation', 'Help', 'Gui', 'Pty'];
+      for (const mod of modules) {
+        classpathParts.push(path.join(frameworkDir, mod, 'lib', '*'));
+      }
+    }
+
+    // Add ALL Features modules
+    const featuresDir = path.join(ghidraPaths.ghidraHome, 'Ghidra', 'Features');
+    try {
+      const featureModules = fs.readdirSync(featuresDir);
+      for (const mod of featureModules) {
+        const libDir = path.join(featuresDir, mod, 'lib');
+        if (fs.existsSync(libDir)) {
+          classpathParts.push(path.join(libDir, '*'));
+        }
+      }
+    } catch {
+      // Fallback
+      const modules = ['Base', 'Decompiler', 'FileFormats', 'Recognizers'];
+      for (const mod of modules) {
+        classpathParts.push(path.join(featuresDir, mod, 'lib', '*'));
+      }
+    }
+
+    // Add ALL Processors (needed for disassembly of various architectures)
+    const processorsDir = path.join(ghidraPaths.ghidraHome, 'Ghidra', 'Processors');
+    try {
+      const processorModules = fs.readdirSync(processorsDir);
+      for (const mod of processorModules) {
+        const libDir = path.join(processorsDir, mod, 'lib');
+        if (fs.existsSync(libDir)) {
+          classpathParts.push(path.join(libDir, '*'));
+        }
+      }
+    } catch {
+      // If listing fails, add common processor pattern
+      classpathParts.push(path.join(processorsDir, '*', 'lib', '*'));
+    }
+
+    // Add patches
+    classpathParts.push(
+      path.join(ghidraPaths.ghidraHome, 'Ghidra', 'patch', '*')
+    );
+
+    const classpath = classpathParts.join(path.delimiter);
+
+    // Use 127.0.0.1 instead of localhost to avoid IPv4/IPv6 issues
+    const daemonUrl = `http://127.0.0.1:${daemonPort}`;
+    console.log(`[WorkerPool] Spawning worker with daemon URL: ${daemonUrl}`);
+
+    const args = [
+      `-Xmx${memoryLimit}`,
+      '-Duser.language=en',
+      '-Duser.country=US',
+      '-cp', classpath,
+      'com.ghidramcp.Worker',
+      '--worker-id', workerId,
+      '--session-id', sessionId,
+      '--daemon-url', daemonUrl,
+      '--binary', options.binaryPath,
+      '--project', options.projectPath,
+    ];
+
+    if (options.autoAnalyze) {
+      args.push('--analyze');
+    }
+    if (options.analysisTimeout) {
+      args.push('--analysis-timeout', String(options.analysisTimeout));
+    }
+    if (options.programPath) {
+      args.push('--program-path', options.programPath);
+    }
+    if (options.readOnly) {
+      args.push('--read-only');
+    }
+
+    const proc = child_process.spawn(javaPath, args, {
+      cwd: ghidraPaths.ghidraHome,
+      env: {
+        ...process.env,
+        GHIDRA_HOME: ghidraPaths.ghidraHome,
+      },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+
+    const state: WorkerState = {
+      id: workerId,
+      sessionId,
+      process: proc,
+      status: 'starting',
+      pid: proc.pid,
+      startTime: Date.now(),
+      activeCommands: 0,
+      memorySamples: [],
+      pendingCommands: new Map(),
+      commandQueue: [],
+      commandCallbacks: [],
+    };
+
+    this.workers.set(workerId, state);
+
+    // Handle process output
+    proc.stdout?.on('data', (data) => {
+      console.log(`[Worker ${workerId}] ${data.toString().trim()}`);
+    });
+
+    const workerLog = this.log ? createLogger(this.log.store, `Worker:${sessionId}:${workerId.slice(0, 8)}`) : null;
+
+    proc.stderr?.on('data', (data) => {
+      const msg = data.toString().trim();
+      console.error(`[Worker ${workerId}] ERROR: ${msg}`);
+      workerLog?.error(msg);
+    });
+
+    proc.on('exit', (code, signal) => {
+      console.log(`[Worker ${workerId}] Exited with code ${code}, signal ${signal}`);
+      workerLog?.error(`Worker exited (code=${code}, signal=${signal})`);
+      state.status = 'stopped';
+
+      // Reject all pending commands
+      for (const pending of state.pendingCommands.values()) {
+        clearTimeout(pending.timeout);
+        pending.reject(new Error('Worker exited'));
+      }
+      state.pendingCommands.clear();
+
+      // Remove dead worker from pool so it doesn't count against maxWorkers
+      this.workers.delete(workerId);
+
+      // Notify session manager of worker death
+      this.onWorkerExitCallback?.(workerId, sessionId, code, signal);
+    });
+
+    proc.on('error', (error) => {
+      console.error(`[Worker ${workerId}] Error:`, error);
+      state.status = 'stopped';
+    });
+
+    return workerId;
+  }
+
+  /**
+   * Wait for a worker to be ready
+   */
+  async waitForReady(workerId: string): Promise<void> {
+    const state = this.workers.get(workerId);
+    if (!state) {
+      throw new Error(`Worker not found: ${workerId}`);
+    }
+
+    const startTime = Date.now();
+
+    return new Promise((resolve, reject) => {
+      const check = () => {
+        if (state.status === 'idle') {
+          resolve();
+          return;
+        }
+
+        if (state.status === 'stopped') {
+          reject(new Error('Worker stopped before becoming ready'));
+          return;
+        }
+
+        if (Date.now() - startTime > WORKER_STARTUP_TIMEOUT_MS) {
+          reject(new Error('Worker startup timeout'));
+          return;
+        }
+
+        setTimeout(check, 100);
+      };
+
+      check();
+    });
+  }
+
+  /**
+   * Send a command to a worker and wait for response
+   */
+  /**
+   * Send a command to a worker and wait for response.
+   * If programPath is set, injects _programPath into params for program routing.
+   */
+  async sendCommand(workerId: string, command: WorkerCommand, programPath?: string): Promise<WorkerResponse> {
+    const state = this.workers.get(workerId);
+    if (!state) {
+      throw new Error(`Worker not found: ${workerId}`);
+    }
+
+    if (state.status === 'stopped') {
+      throw new Error('Worker has stopped');
+    }
+
+    // For adopted workers (no child process), check if PID is still alive
+    if (state.process === null && state.pid) {
+      try {
+        process.kill(state.pid, 0); // signal 0 = liveness check
+      } catch {
+        // PID is dead — trigger death handling immediately
+        state.status = 'stopped';
+        for (const pending of state.pendingCommands.values()) {
+          clearTimeout(pending.timeout);
+          pending.reject(new Error('Worker exited'));
+        }
+        state.pendingCommands.clear();
+        this.workers.delete(workerId);
+        this.onWorkerExitCallback?.(workerId, state.sessionId, null, null);
+        throw new Error('Worker has stopped');
+      }
+    }
+
+    // Inject _programPath for multi-program routing
+    if (programPath) {
+      (command as any).params = { ...command.params, _programPath: programPath };
+    }
+
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        state.pendingCommands.delete(command.id);
+        reject(new Error('Command timeout'));
+      }, command.timeout ?? DEFAULT_COMMAND_TIMEOUT_MS);
+
+      state.pendingCommands.set(command.id, {
+        command,
+        resolve,
+        reject,
+        timeout,
+      });
+
+      // Deliver command: either directly via waiting long-poll callback, or queue it
+      const queuedAt = Date.now();
+      (command as any)._queuedAt = queuedAt;
+      if (state.commandCallbacks.length > 0) {
+        const callback = state.commandCallbacks.shift()!;
+        state.activeCommands++;
+        state.status = 'busy';
+        this.log?.info(`${command.command} → worker (direct) [q=${state.commandQueue.length} active=${state.activeCommands}]`);
+        callback(command);
+      } else {
+        state.commandQueue.push(command);
+        this.log?.info(`${command.command} → queued [q=${state.commandQueue.length} active=${state.activeCommands} cbs=${state.commandCallbacks.length}]`);
+      }
+    });
+  }
+
+  /**
+   * Get next command for a worker (called via HTTP by worker)
+   */
+  getNextCommand(workerId: string): WorkerCommand | null {
+    const state = this.workers.get(workerId);
+    if (!state) {
+      return null;
+    }
+
+    const command = state.commandQueue.shift();
+    if (command) {
+      state.activeCommands++;
+      state.status = 'busy';
+      const waitMs = (command as any)._queuedAt ? Date.now() - (command as any)._queuedAt : -1;
+      this.log?.info(`${command.command} → worker (from queue, waited ${waitMs}ms) [q=${state.commandQueue.length} active=${state.activeCommands}]`);
+    }
+    return command ?? null;
+  }
+
+  /**
+   * Register callback for when a command is available
+   */
+  onCommand(workerId: string, callback: (cmd: WorkerCommand) => void): void {
+    const state = this.workers.get(workerId);
+    if (!state) {
+      return;
+    }
+
+    // Check if there's already a command waiting
+    const command = state.commandQueue.shift();
+    if (command) {
+      state.activeCommands++;
+      state.status = state.activeCommands > 0 ? 'busy' : 'idle';
+      callback(command);
+      return;
+    }
+
+    // Otherwise wait for next command
+    state.commandCallbacks.push(callback);
+  }
+
+  /**
+   * Remove a command callback (called when long-poll times out)
+   */
+  removeCommandCallback(workerId: string, callback: (cmd: WorkerCommand) => void): void {
+    const state = this.workers.get(workerId);
+    if (!state) return;
+    const idx = state.commandCallbacks.indexOf(callback);
+    if (idx !== -1) {
+      state.commandCallbacks.splice(idx, 1);
+    }
+  }
+
+  /**
+   * Handle worker registration (called via HTTP by worker)
+   */
+  handleWorkerRegistration(workerId: string, registration: WorkerRegistration): void {
+    const state = this.workers.get(workerId);
+    if (!state) {
+      console.warn(`Unknown worker trying to register: ${workerId}`);
+      return;
+    }
+
+    state.status = 'idle';
+    state.lastHeartbeat = Date.now();
+    console.log(`Worker ${workerId} registered for session ${registration.sessionId}`);
+  }
+
+  /**
+   * Handle worker result (called via HTTP by worker)
+   */
+  async handleWorkerResult(workerId: string, result: WorkerResponse): Promise<void> {
+    const state = this.workers.get(workerId);
+    if (!state) {
+      return;
+    }
+
+    const pending = state.pendingCommands.get(result.id);
+    if (!pending) {
+      this.log?.warn(`result for unknown command: ${result.id}`);
+      return;
+    }
+
+    const queuedAt = (pending.command as any)._queuedAt as number | undefined;
+    const totalMs = queuedAt ? Date.now() - queuedAt : -1;
+    const ok = result.success ? 'ok' : 'ERR';
+    this.log?.info(`${pending.command.command} ← ${ok} ${totalMs}ms [active=${state.activeCommands - 1}]`);
+
+    clearTimeout(pending.timeout);
+    state.pendingCommands.delete(result.id);
+    state.activeCommands = Math.max(0, state.activeCommands - 1);
+    state.status = state.activeCommands > 0 ? 'busy' : 'idle';
+
+    pending.resolve(result);
+  }
+
+  /**
+   * Handle worker heartbeat
+   */
+  handleHeartbeat(workerId: string, heartbeat: WorkerHeartbeat): void {
+    const state = this.workers.get(workerId);
+    if (!state) {
+      return;
+    }
+
+    state.lastHeartbeat = Date.now();
+    if (heartbeat.status === 'busy' && state.status === 'idle') {
+      state.status = 'busy';
+    } else if (heartbeat.status === 'idle' && state.status === 'busy' && state.activeCommands === 0) {
+      state.status = 'idle';
+    }
+
+    // Store memory usage from heartbeat
+    if ((heartbeat as any).memoryUsed != null) {
+      state.memoryUsed = (heartbeat as any).memoryUsed;
+      state.memorySamples.push(state.memoryUsed!);
+      if (state.memorySamples.length > 60) {
+        state.memorySamples.shift();
+      }
+    }
+
+    // Store thread pool status
+    if (heartbeat.threads) {
+      state.threads = heartbeat.threads;
+    }
+
+    // Store dirty tracking info from worker
+    if (heartbeat.hasDirty && heartbeat.dirtySummary) {
+      (state as any).dirtySummary = heartbeat.dirtySummary;
+    } else {
+      (state as any).dirtySummary = undefined;
+    }
+  }
+
+  /**
+   * Shutdown a specific worker
+   */
+  async shutdownWorker(workerId: string): Promise<void> {
+    const state = this.workers.get(workerId);
+    if (!state) {
+      return;
+    }
+
+    state.status = 'stopping';
+
+    // Send shutdown command
+    try {
+      await this.sendCommand(workerId, {
+        id: crypto.randomUUID(),
+        command: 'shutdown',
+        params: { save: true },
+        timeout: 10000,
+      });
+    } catch {
+      // Force kill if graceful shutdown fails
+      state.process?.kill('SIGKILL');
+    }
+
+    this.workers.delete(workerId);
+  }
+
+  /**
+   * Shutdown all workers
+   */
+  async shutdownAll(): Promise<void> {
+    const shutdowns = Array.from(this.workers.keys()).map((id) =>
+      this.shutdownWorker(id)
+    );
+    await Promise.all(shutdowns);
+  }
+
+  /**
+   * Get worker count
+   */
+  getWorkerCount(): number {
+    return this.workers.size;
+  }
+
+  /**
+   * Get worker PID
+   */
+  getWorkerPid(workerId: string): number | undefined {
+    return this.workers.get(workerId)?.pid;
+  }
+
+  /**
+   * Save all workers without killing them.
+   * Used during graceful daemon shutdown so workers can reconnect later.
+   */
+  async saveAll(): Promise<void> {
+    const saves: Promise<void>[] = [];
+    for (const [workerId, state] of this.workers) {
+      if (state.status === 'idle' || state.status === 'busy') {
+        saves.push(
+          this.sendCommand(workerId, {
+            id: crypto.randomUUID(),
+            command: 'save',
+            params: {},
+            timeout: 5000,
+          }).then(() => {
+            console.log(`[WorkerPool] Worker ${workerId} saved`);
+          }).catch((err) => {
+            console.warn(`[WorkerPool] Worker ${workerId} save failed: ${(err as Error).message}`);
+          })
+        );
+      }
+    }
+    await Promise.allSettled(saves);
+    // Don't kill workers — they'll detect disconnect and enter reconnection mode
+    clearInterval(this.stalenessTimer);
+    this.workers.clear();
+  }
+
+  /**
+   * Adopt a reconnecting worker that survived a daemon restart.
+   * Creates a WorkerState without a child process reference.
+   */
+  adoptWorker(sessionId: string, pid: number): string {
+    const workerId = crypto.randomUUID();
+    const state: WorkerState = {
+      id: workerId,
+      sessionId,
+      process: null, // adopted — not managed by us
+      status: 'idle',
+      pid,
+      startTime: Date.now(),
+      lastHeartbeat: Date.now(),
+      activeCommands: 0,
+      memorySamples: [],
+      pendingCommands: new Map(),
+      commandQueue: [],
+      commandCallbacks: [],
+    };
+    this.workers.set(workerId, state);
+    console.log(`[WorkerPool] Adopted worker ${workerId} (pid ${pid}) for session ${sessionId}`);
+    return workerId;
+  }
+
+  /**
+   * Get sanitized worker states for the dashboard API.
+   */
+  getWorkerStates(): Array<{
+    id: string;
+    sessionId: string;
+    status: string;
+    pid?: number;
+    startTime: number;
+    lastHeartbeat?: number;
+    activeCommands: number;
+    memoryUsed?: number;
+    memorySamples: number[];
+    dirtySummary?: { functions: number; dataTypes: number; globals: number };
+    threads?: { readPoolSize: number; readPoolActive: number; activeThreads: string[]; currentCommands: Record<string, string> };
+  }> {
+    return Array.from(this.workers.values()).map(state => ({
+      id: state.id,
+      sessionId: state.sessionId,
+      status: state.status,
+      pid: state.pid,
+      startTime: state.startTime,
+      lastHeartbeat: state.lastHeartbeat,
+      activeCommands: state.activeCommands,
+      memoryUsed: state.memoryUsed,
+      memorySamples: [...state.memorySamples],
+      dirtySummary: (state as any).dirtySummary,
+      threads: state.threads,
+    }));
+  }
+}

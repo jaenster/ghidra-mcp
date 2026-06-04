@@ -1,0 +1,54 @@
+{
+  "name": "ghidra-mcp",
+  "version": "1.0.0",
+  "description": "Headless Ghidra MCP server with SSE/HTTP transport",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "ghidra": "./packages/cli/dist/bin.js"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w @ghidra-mcp/shared && npm run build -w @ghidra-mcp/mcp && npm run build -w @ghidra-mcp/daemon && npm run build -w @ghidra-mcp/cli && npm run build:dashboard",
+    "build:dashboard": "npm run build -w @ghidra-mcp/dashboard || true",
+    "clean": "npm run clean --workspaces --if-present && rm -rf node_modules",
+    "test": "npm run test:unit && npm run test:e2e",
+    "test:unit": "npm run test --workspaces --if-present",
+    "test:e2e": "node --test --test-timeout=120000 --import tsx 'test/e2e/**/*.test.ts'",
+    "test:e2e:debug": "DEBUG=1 node --test --test-timeout=120000 --import tsx 'test/e2e/**/*.test.ts'",
+    "lint": "eslint packages/*/src/**/*.ts",
+    "typecheck": "tsc -p packages/shared/tsconfig.json --noEmit && tsc -p packages/mcp/tsconfig.json --noEmit && tsc -p packages/daemon/tsconfig.json --noEmit && tsc -p packages/cli/tsconfig.json --noEmit",
+    "typecheck:all": "tsc --build",
+    "start": "npm run start -w @ghidra-mcp/cli",
+    "dev": "npm run dev -w @ghidra-mcp/daemon",
+    "fixtures:build": "cd test-fixtures && make native",
+    "fixtures:cross": "cd test-fixtures && make cross",
+    "fixtures:ghidra": "cd test-fixtures && make ghidra-setup",
+    "fixtures:clean": "cd test-fixtures && make distclean",
+    "fixtures:verify": "cd test-fixtures && make verify",
+    "install:ghidra": "./scripts/install-ghidra.sh",
+    "install:worker": "cd ghidra-worker && ./gradlew build",
+    "setup": "npm run install:ghidra && npm run install:worker && npm run fixtures:build",
+    "ci": "./scripts/ci.sh",
+    "ci:quick": "./scripts/ci.sh --skip-e2e"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@typescript-eslint/eslint-plugin": "^6.19.0",
+    "@typescript-eslint/parser": "^6.19.0",
+    "eslint": "^8.56.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.3.3",
+    "vitest": "^1.2.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jaenster/ghidra-mcp"
+  },
+  "license": "MIT"
+}

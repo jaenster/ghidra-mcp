@@ -1,0 +1,68 @@
+plugins {
+    id 'java'
+    id 'application'
+}
+
+group = 'com.ghidramcp'
+version = '1.0.0'
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+repositories {
+    mavenCentral()
+}
+
+// Ghidra installation path - can be overridden via command line
+def ghidraInstallDir = System.getenv('GHIDRA_HOME') ?: '/Applications/ghidra'
+
+dependencies {
+    // JSON processing
+    implementation 'com.google.code.gson:gson:2.10.1'
+
+    // HTTP client
+    implementation 'org.apache.httpcomponents.client5:httpclient5:5.3'
+
+    // Ghidra JARs - these are found in the Ghidra installation
+    // Note: In production, these would be resolved from the GHIDRA_HOME path
+    compileOnly fileTree(dir: "${ghidraInstallDir}/Ghidra/Framework/Generic/lib", include: '*.jar')
+    compileOnly fileTree(dir: "${ghidraInstallDir}/Ghidra/Framework/SoftwareModeling/lib", include: '*.jar')
+    compileOnly fileTree(dir: "${ghidraInstallDir}/Ghidra/Framework/Project/lib", include: '*.jar')
+    compileOnly fileTree(dir: "${ghidraInstallDir}/Ghidra/Framework/Docking/lib", include: '*.jar')
+    compileOnly fileTree(dir: "${ghidraInstallDir}/Ghidra/Framework/Utility/lib", include: '*.jar')
+    compileOnly fileTree(dir: "${ghidraInstallDir}/Ghidra/Framework/Gui/lib", include: '*.jar')
+    compileOnly fileTree(dir: "${ghidraInstallDir}/Ghidra/Framework/FileSystem/lib", include: '*.jar')
+    compileOnly fileTree(dir: "${ghidraInstallDir}/Ghidra/Framework/DB/lib", include: '*.jar')
+    compileOnly fileTree(dir: "${ghidraInstallDir}/Ghidra/Features/Base/lib", include: '*.jar')
+    compileOnly fileTree(dir: "${ghidraInstallDir}/Ghidra/Features/Decompiler/lib", include: '*.jar')
+    compileOnly fileTree(dir: "${ghidraInstallDir}/Ghidra/Features/Jython/lib", include: '*.jar')
+    compileOnly fileTree(dir: "${ghidraInstallDir}/Ghidra/Features/VersionTracking/lib", include: '*.jar')
+}
+
+application {
+    mainClass = 'com.ghidramcp.Worker'
+}
+
+jar {
+    manifest {
+        attributes(
+            'Main-Class': 'com.ghidramcp.Worker',
+            'Class-Path': configurations.runtimeClasspath.collect { it.name }.join(' ')
+        )
+    }
+
+    // Create a fat JAR with all dependencies
+    from {
+        configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+    }
+
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+
+    archiveBaseName = 'ghidra-worker'
+}
+
+tasks.withType(JavaCompile) {
+    options.encoding = 'UTF-8'
+}

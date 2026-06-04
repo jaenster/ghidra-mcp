@@ -1,0 +1,34 @@
+{
+  "name": "@ghidra-mcp/cli",
+  "version": "1.0.0",
+  "description": "Ghidra MCP CLI",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "ghidra-mcp": "./bin/ghidra-mcp.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist *.tsbuildinfo",
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@ghidra-mcp/shared": "*",
+    "@ghidra-mcp/daemon": "*",
+    "@ghidra-mcp/mcp": "*",
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "commander": "^11.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.3.3"
+  }
+}
