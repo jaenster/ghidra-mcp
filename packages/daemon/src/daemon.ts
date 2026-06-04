@@ -6,6 +6,7 @@ import * as fs from 'node:fs';
 import * as http from 'node:http';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as crypto from 'node:crypto';
 import { getAppPaths, ensureAppDirs, getDaemonPort, getDaemonHost } from '@ghidra-mcp/shared/platform';
 import { createServer } from './server.js';
 import { SessionManager } from './sessions/manager.js';
@@ -46,6 +47,22 @@ export async function startDaemon(options?: {
 
   // Set the port in environment so workers know which port to connect to
   process.env.GHIDRA_MCP_PORT = String(port);
+
+  // Secret authenticating the worker control-plane (/internal/*). Prefer an
+  // explicit env value; otherwise persist a generated one so it stays stable
+  // across daemon restarts (workers re-adopting after a restart must match).
+  if (!process.env.GHIDRA_MCP_WORKER_SECRET) {
+    const secretFile = path.join(paths.dataDir, 'worker-secret');
+    let secret: string;
+    try {
+      secret = fs.readFileSync(secretFile, 'utf-8').trim();
+      if (!secret) throw new Error('empty');
+    } catch {
+      secret = crypto.randomBytes(24).toString('hex');
+      try { fs.writeFileSync(secretFile, secret, { mode: 0o600 }); } catch { /* best effort */ }
+    }
+    process.env.GHIDRA_MCP_WORKER_SECRET = secret;
+  }
 
   // Check if already running (unless force is set)
   if (!options?.force) {

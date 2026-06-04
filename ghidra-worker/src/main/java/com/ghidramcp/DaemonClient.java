@@ -24,6 +24,8 @@ public class DaemonClient {
     private String workerId;  // non-final: updated on reconnect
     private final String sessionId;
     private final Logger log;
+    // Shared secret authenticating /internal/* calls; supplied by the daemon via env.
+    private static final String WORKER_SECRET = System.getenv("GHIDRA_MCP_WORKER_SECRET");
     private final int pollTimeout = 10000; // 10 seconds (must be > server's 5s long-poll timeout)
     private volatile long lastHeartbeat = 0;
     private final long heartbeatInterval = 5000; // 5 seconds
@@ -237,6 +239,7 @@ public class DaemonClient {
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
         conn.setRequestMethod("POST");
         conn.setRequestProperty("Content-Type", "application/json");
+        if (WORKER_SECRET != null) conn.setRequestProperty("X-Worker-Secret", WORKER_SECRET);
         conn.setDoOutput(true);
         conn.setConnectTimeout(10000);
         conn.setReadTimeout(10000);
@@ -286,6 +289,7 @@ public class DaemonClient {
         URL url = new URL(daemonUrl + path);
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
         conn.setRequestMethod("GET");
+        if (WORKER_SECRET != null) conn.setRequestProperty("X-Worker-Secret", WORKER_SECRET);
         conn.setConnectTimeout(timeout);
         conn.setReadTimeout(timeout);
 
@@ -307,6 +311,7 @@ public class DaemonClient {
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
         conn.setRequestMethod("POST");
         conn.setRequestProperty("Content-Type", "application/json");
+        if (WORKER_SECRET != null) conn.setRequestProperty("X-Worker-Secret", WORKER_SECRET);
         conn.setDoOutput(true);
         conn.setConnectTimeout(10000);
         conn.setReadTimeout(10000);

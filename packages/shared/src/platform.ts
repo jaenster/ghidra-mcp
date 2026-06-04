@@ -324,6 +324,16 @@ export function getDaemonHost(): string {
 }
 
 /**
+ * Shared secret authenticating worker→daemon `/internal/*` control-plane calls.
+ * The daemon generates one at startup if unset and passes it to each spawned
+ * worker; both sides read it from this env var. Returns undefined only if a
+ * caller reads it before the daemon has initialized it.
+ */
+export function getWorkerSecret(): string | undefined {
+  return process.env.GHIDRA_MCP_WORKER_SECRET?.trim() || undefined;
+}
+
+/**
  * Base URL a spawned worker uses to call back to the daemon's internal API.
  * Workers are co-located with the daemon (child processes), so loopback is the
  * default; GHIDRA_MCP_DAEMON_URL overrides it if the daemon is reached by a

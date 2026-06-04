@@ -74,8 +74,10 @@ public class Logger {
 
         try {
             // Convert http:// to ws:// or https:// to wss://
+            String secret = System.getenv("GHIDRA_MCP_WORKER_SECRET");
             String wsUrl = daemonUrl.replace("http://", "ws://").replace("https://", "wss://")
-                    + "/internal/ws/logs?workerId=" + workerId;
+                    + "/internal/ws/logs?workerId=" + workerId
+                    + (secret != null ? "&secret=" + java.net.URLEncoder.encode(secret, java.nio.charset.StandardCharsets.UTF_8) : "");
 
             HttpClient client = HttpClient.newBuilder()
                     .connectTimeout(Duration.ofSeconds(5))

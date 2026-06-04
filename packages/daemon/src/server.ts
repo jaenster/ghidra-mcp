@@ -3,7 +3,8 @@
  */
 
 import * as http from 'node:http';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { getWorkerSecret } from '@ghidra-mcp/shared/platform';
 import express, { type Express, type Request, type Response } from 'express';
 import { WebSocketServer, WebSocket } from 'ws';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
@@ -204,6 +205,22 @@ export async function createServer(options: ServerOptions): Promise<{
   } catch {
     // Dashboard not built yet, skip
   }
+
+  // The worker control-plane is authenticated with a per-daemon shared secret
+  // (sent by spawned workers). This keeps /internal/* safe even if the daemon
+  // binds 0.0.0.0 and an ingress misroutes it. Applied to every /internal route
+  // and the log WebSocket upgrade below.
+  const workerSecret = getWorkerSecret();
+  const requireWorkerSecret: RequestHandler = (req, res, next) => {
+    if (!workerSecret) return next(); // not initialized (should not happen under the daemon)
+    const provided = req.headers['x-worker-secret'];
+    if (typeof provided === 'string' && provided.length === workerSecret.length &&
+        timingSafeEqual(Buffer.from(provided), Buffer.from(workerSecret))) {
+      return next();
+    }
+    res.status(403).json({ error: 'Forbidden' });
+  };
+  app.use('/internal', requireWorkerSecret);
 
   // Internal endpoint for worker back-connect
   app.post('/internal/worker/:workerId/register', (req: Request, res: Response) => {
@@ -580,6 +597,14 @@ export async function createServer(options: ServerOptions): Promise<{
     const url = new URL(request.url!, `http://${request.headers.host}`);
 
     if (url.pathname === '/internal/ws/logs') {
+      // Authenticate the log socket with the same worker secret (passed as a
+      // query param since the handshake carries workerId there already).
+      const provided = url.searchParams.get('secret') ?? '';
+      if (workerSecret && !(provided.length === workerSecret.length &&
+          timingSafeEqual(Buffer.from(provided), Buffer.from(workerSecret)))) {
+        socket.destroy();
+        return;
+      }
       const workerId = url.searchParams.get('workerId');
 
       logWss.handleUpgrade(request, socket, head, (ws: WebSocket) => {

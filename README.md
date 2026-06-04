@@ -47,6 +47,7 @@ Set these and the daemon becomes a self-contained OAuth 2.1 authorization server
 | `GHIDRA_MCP_ACCESS_TTL` | Access-token lifetime (sec) | `3600` |
 | `GHIDRA_MCP_REFRESH_TTL` | Refresh-token lifetime (sec) | `2592000` |
 | `GHIDRA_MCP_DAEMON_URL` | Worker→daemon callback URL | `http://127.0.0.1:<port>` |
+| `GHIDRA_MCP_WORKER_SECRET` | Shared secret for the `/internal/*` worker control-plane | auto-generated, persisted in the data dir |
 | `GHIDRA_HOME` | Ghidra install directory | platform default |
 
 OAuth activates only when both `GHIDRA_MCP_PUBLIC_URL` **and** `GHIDRA_MCP_AUTH_SECRET` are set.
@@ -59,7 +60,7 @@ the OAuth endpoints, registers via DCR, and prompts for the connector password.
 - MCP: `POST/GET/DELETE /mcp` (Streamable HTTP), `GET /sse` + `POST /sse/messages` (SSE) — **token-gated when OAuth is on**
 - OAuth: `/.well-known/oauth-authorization-server`, `/.well-known/oauth-protected-resource`, `/authorize`, `/token`, `/register`, `/revoke`, `/oauth/consent`
 - Open: `/health`, `/status`, `/dashboard`
-- Internal (worker control-plane): `/internal/worker/:id/*` — **must not be exposed by the ingress**; only loopback / in-pod traffic should reach it.
+- Internal (worker control-plane): `/internal/worker/:id/*` + the log WebSocket — authenticated with the per-daemon `GHIDRA_MCP_WORKER_SECRET` (auto-generated, passed to spawned workers via the environment). Still keep it off the ingress as defense in depth; only loopback / in-pod traffic should reach it.
 
 ## Tests
 

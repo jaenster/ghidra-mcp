@@ -1405,6 +1405,14 @@ export class StateDatabase {
     this.save();
   }
 
+  /** Remove expired authorization codes and tokens to bound table growth. */
+  pruneExpiredOAuth(now: number): void {
+    if (!this.db) throw new Error('Database not initialized');
+    this.db.run('DELETE FROM oauth_codes WHERE expires_at < ?', [now]);
+    this.db.run('DELETE FROM oauth_tokens WHERE expires_at IS NOT NULL AND expires_at < ?', [now]);
+    this.save();
+  }
+
   // =========================================================================
   // Lifecycle
   // =========================================================================

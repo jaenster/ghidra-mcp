@@ -9,10 +9,17 @@
  *
  * Auth only activates when both GHIDRA_MCP_PUBLIC_URL and GHIDRA_MCP_AUTH_SECRET
  * are set; otherwise the daemon stays open for local development.
+ *
+ * Security notes:
+ * - Tokens and authorization codes are persisted only as SHA-256 hashes, so a
+ *   leak of the state DB does not expose usable credentials.
+ * - The consent POST is bound to a legitimate /authorize render via an HMAC over
+ *   the authorization parameters, and the redirect_uri is re-validated against
+ *   the registered client before any code is issued.
  */
 
-import { randomBytes, timingSafeEqual } from 'node:crypto';
-import type { Express, Request, Response } from 'express';
+import { randomBytes, createHash, createHmac, timingSafeEqual } from 'node:crypto';
+import type { Express, Request, Response, RequestHandler } from 'express';
 import express from 'express';
 import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from '@modelcontextprotocol/sdk/server/auth/router.js';
 import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
@@ -32,6 +39,11 @@ export interface OAuthConfig {
   refreshTtlSec: number;
 }
 
+function positiveInt(value: string | undefined, fallback: number): number {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+}
+
 export function getOAuthConfig(): OAuthConfig {
   const publicUrl = process.env.GHIDRA_MCP_PUBLIC_URL?.trim().replace(/\/+$/, '') ?? '';
   const secret = process.env.GHIDRA_MCP_AUTH_SECRET ?? '';
@@ -41,23 +53,32 @@ export function getOAuthConfig(): OAuthConfig {
     publicUrl,
     secret,
     scopesSupported: scopes ? scopes.split(/[\s,]+/).filter(Boolean) : ['ghidra'],
-    accessTtlSec: Number(process.env.GHIDRA_MCP_ACCESS_TTL ?? 3600),
-    refreshTtlSec: Number(process.env.GHIDRA_MCP_REFRESH_TTL ?? 30 * 24 * 3600),
+    accessTtlSec: positiveInt(process.env.GHIDRA_MCP_ACCESS_TTL, 3600),
+    refreshTtlSec: positiveInt(process.env.GHIDRA_MCP_REFRESH_TTL, 30 * 24 * 3600),
   };
 }
 
 const CODE_TTL_MS = 5 * 60 * 1000;
 const CONSENT_PATH = '/oauth/consent';
 
-function token(): string {
+function newSecret(): string {
   return randomBytes(32).toString('hex');
 }
 
-function secretMatches(provided: string, expected: string): boolean {
-  const a = Buffer.from(provided);
-  const b = Buffer.from(expected);
-  if (a.length !== b.length) return false;
-  return timingSafeEqual(a, b);
+/** SHA-256 hex — used so only hashes of tokens/codes are persisted. */
+function hash(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+/** Constant-time compare that does not leak length (both sides hashed first). */
+function safeEqual(a: string, b: string): boolean {
+  return timingSafeEqual(Buffer.from(hash(a), 'hex'), Buffer.from(hash(b), 'hex'));
+}
+
+function intersectScopes(requested: string, granted: string): string {
+  const grantedSet = new Set(granted.split(' ').filter(Boolean));
+  const kept = requested.split(' ').filter((s) => s && grantedSet.has(s));
+  return kept.join(' ');
 }
 
 /** Clients store backed by the persistent StateDatabase (survives restarts). */
@@ -77,28 +98,38 @@ class DbClientsStore implements OAuthRegisteredClientsStore {
 
 export class GhidraOAuthProvider implements OAuthServerProvider {
   readonly clientsStore: DbClientsStore;
+  /** Key for binding the consent POST to a legitimate /authorize render. */
+  private readonly consentKey: Buffer;
 
   constructor(private db: StateDatabase, private config: OAuthConfig) {
     this.clientsStore = new DbClientsStore(db);
+    this.consentKey = createHash('sha256').update(`${config.secret}|consent-binding`).digest();
+  }
+
+  /** HMAC over the authorization params so consent cannot be forged/tampered. */
+  signParams(p: { clientId: string; redirectUri: string; codeChallenge: string; state: string; scope: string; resource: string }): string {
+    return createHmac('sha256', this.consentKey)
+      .update([p.clientId, p.redirectUri, p.codeChallenge, p.state, p.scope, p.resource].join('\n'))
+      .digest('hex');
   }
 
   async authorize(client: OAuthClientInformationFull, params: AuthorizationParams, res: Response): Promise<void> {
-    // Render a minimal consent/login page; the form posts to CONSENT_PATH,
-    // which verifies the shared secret and issues the authorization code.
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.send(renderConsentPage({
+    const view = {
       clientId: client.client_id,
       clientName: client.client_name ?? client.client_id,
       redirectUri: params.redirectUri,
       codeChallenge: params.codeChallenge,
       state: params.state ?? '',
-      scopes: (params.scopes ?? []).join(' '),
+      scope: (params.scopes ?? []).join(' '),
       resource: params.resource?.href ?? '',
-    }));
+    };
+    const sig = this.signParams(view);
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(renderConsentPage({ ...view, sig }));
   }
 
   async challengeForAuthorizationCode(_client: OAuthClientInformationFull, authorizationCode: string): Promise<string> {
-    const code = this.db.getAuthCode(authorizationCode);
+    const code = this.db.getAuthCode(hash(authorizationCode));
     if (!code) throw new InvalidGrantError('Invalid authorization code');
     return code.codeChallenge;
   }
@@ -108,17 +139,17 @@ export class GhidraOAuthProvider implements OAuthServerProvider {
     authorizationCode: string,
     _codeVerifier?: string,
     redirectUri?: string,
+    resource?: URL,
   ): Promise<OAuthTokens> {
-    const code = this.db.getAuthCode(authorizationCode);
+    const codeHash = hash(authorizationCode);
+    const code = this.db.getAuthCode(codeHash);
     if (!code || code.clientId !== client.client_id) throw new InvalidGrantError('Invalid authorization code');
-    if (Date.now() > code.expiresAt) {
-      this.db.deleteAuthCode(authorizationCode);
-      throw new InvalidGrantError('Authorization code expired');
+    this.db.deleteAuthCode(codeHash); // one-time use — delete before any further failure path
+    if (Date.now() > code.expiresAt) throw new InvalidGrantError('Authorization code expired');
+    if (redirectUri && redirectUri !== code.redirectUri) throw new InvalidGrantError('redirect_uri mismatch');
+    if (resource && code.resource && resource.href !== code.resource) {
+      throw new InvalidGrantError('resource does not match authorization request');
     }
-    if (redirectUri && redirectUri !== code.redirectUri) {
-      throw new InvalidGrantError('redirect_uri mismatch');
-    }
-    this.db.deleteAuthCode(authorizationCode); // one-time use
     return this.issueTokens(client.client_id, code.scopes, code.resource);
   }
 
@@ -127,21 +158,28 @@ export class GhidraOAuthProvider implements OAuthServerProvider {
     refreshToken: string,
     scopes?: string[],
   ): Promise<OAuthTokens> {
-    const stored = this.db.getOAuthToken(refreshToken);
+    const refreshHash = hash(refreshToken);
+    const stored = this.db.getOAuthToken(refreshHash);
     if (!stored || stored.kind !== 'refresh' || stored.clientId !== client.client_id) {
       throw new InvalidGrantError('Invalid refresh token');
     }
-    const grantedScopes = scopes && scopes.length ? scopes.join(' ') : stored.scopes;
-    this.db.deleteOAuthToken(refreshToken); // rotate
-    return this.issueTokens(client.client_id, grantedScopes, stored.resource);
+    if (stored.expiresAt && Date.now() > stored.expiresAt) {
+      this.db.deleteOAuthToken(refreshHash);
+      throw new InvalidGrantError('Refresh token expired');
+    }
+    // Requested scopes may only narrow the originally granted set (RFC 6749 §6).
+    const grantedScopes = scopes && scopes.length ? intersectScopes(scopes.join(' '), stored.scopes) : stored.scopes;
+    const tokens = this.issueTokens(client.client_id, grantedScopes, stored.resource);
+    this.db.deleteOAuthToken(refreshHash); // rotate after the replacement is persisted
+    return tokens;
   }
 
   async verifyAccessToken(accessToken: string): Promise<AuthInfo> {
-    const stored = this.db.getOAuthToken(accessToken);
+    const stored = this.db.getOAuthToken(hash(accessToken));
     if (!stored || stored.kind !== 'access') throw new InvalidTokenError('Invalid access token');
     const expiresAt = stored.expiresAt ?? 0;
     if (Date.now() > expiresAt) {
-      this.db.deleteOAuthToken(accessToken);
+      this.db.deleteOAuthToken(hash(accessToken));
       throw new InvalidTokenError('Access token expired');
     }
     return {
@@ -149,11 +187,12 @@ export class GhidraOAuthProvider implements OAuthServerProvider {
       clientId: stored.clientId,
       scopes: stored.scopes ? stored.scopes.split(' ').filter(Boolean) : [],
       expiresAt: Math.floor(expiresAt / 1000),
+      resource: stored.resource ? new URL(stored.resource) : undefined,
     };
   }
 
   async revokeToken(_client: OAuthClientInformationFull, request: OAuthTokenRevocationRequest): Promise<void> {
-    this.db.deleteOAuthToken(request.token);
+    this.db.deleteOAuthToken(hash(request.token));
   }
 
   /** Called by the consent route after the shared secret is verified. */
@@ -164,9 +203,9 @@ export class GhidraOAuthProvider implements OAuthServerProvider {
     scopes: string;
     resource: string;
   }): string {
-    const code = token();
+    const code = newSecret();
     this.db.saveAuthCode({
-      code,
+      code: hash(code),
       clientId: input.clientId,
       redirectUri: input.redirectUri,
       codeChallenge: input.codeChallenge,
@@ -177,11 +216,15 @@ export class GhidraOAuthProvider implements OAuthServerProvider {
     return code;
   }
 
+  pruneExpired(): void {
+    this.db.pruneExpiredOAuth(Date.now());
+  }
+
   private issueTokens(clientId: string, scopes: string, resource: string | null): OAuthTokens {
-    const accessToken = token();
-    const refreshToken = token();
+    const accessToken = newSecret();
+    const refreshToken = newSecret();
     this.db.saveOAuthToken({
-      token: accessToken,
+      token: hash(accessToken),
       kind: 'access',
       clientId,
       scopes,
@@ -189,7 +232,7 @@ export class GhidraOAuthProvider implements OAuthServerProvider {
       expiresAt: Date.now() + this.config.accessTtlSec * 1000,
     });
     this.db.saveOAuthToken({
-      token: refreshToken,
+      token: hash(refreshToken),
       kind: 'refresh',
       clientId,
       scopes,
@@ -212,38 +255,54 @@ export class GhidraOAuthProvider implements OAuthServerProvider {
  * bearer-auth middleware to gate the MCP endpoints.
  */
 export function installOAuth(app: Express, db: StateDatabase, config: OAuthConfig): {
-  requireAuth: express.RequestHandler;
+  requireAuth: RequestHandler;
+  provider: GhidraOAuthProvider;
 } {
   const issuerUrl = new URL(config.publicUrl);
   const provider = new GhidraOAuthProvider(db, config);
 
-  // Consent form submission — verify shared secret, mint the auth code, redirect back.
+  // Consent form submission — verify the shared secret + param binding, re-check
+  // the redirect_uri against the registered client, then mint the code.
   app.post(CONSENT_PATH, express.urlencoded({ extended: false }), (req: Request, res: Response) => {
-    const { password, client_id, redirect_uri, code_challenge, state, scope, resource } = req.body as Record<string, string>;
-    if (!client_id || !redirect_uri || !code_challenge) {
+    const { password, client_id, redirect_uri, code_challenge, state, scope, resource, sig } =
+      req.body as Record<string, string>;
+
+    if (!client_id || !redirect_uri || !code_challenge || !sig) {
       res.status(400).send('Invalid consent request');
       return;
     }
-    if (!password || !secretMatches(password, config.secret)) {
+
+    // 1. Parameters must be unchanged since /authorize rendered them.
+    const expectedSig = provider.signParams({
+      clientId: client_id, redirectUri: redirect_uri, codeChallenge: code_challenge,
+      state: state ?? '', scope: scope ?? '', resource: resource ?? '',
+    });
+    if (!safeEqual(sig, expectedSig)) {
+      res.status(400).send('Invalid or tampered authorization request');
+      return;
+    }
+
+    // 2. redirect_uri must belong to the registered client (defense in depth).
+    const client = provider.clientsStore.getClient(client_id);
+    if (!client || !(client.redirect_uris ?? []).includes(redirect_uri)) {
+      res.status(400).send('Unknown client or unregistered redirect_uri');
+      return;
+    }
+
+    // 3. Human gate: the shared connector password.
+    if (!password || !safeEqual(password, config.secret)) {
       res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
       res.send(renderConsentPage({
-        clientId: client_id,
-        clientName: client_id,
-        redirectUri: redirect_uri,
-        codeChallenge: code_challenge,
-        state: state ?? '',
-        scopes: scope ?? '',
-        resource: resource ?? '',
-        error: 'Incorrect password',
+        clientId: client_id, clientName: client.client_name ?? client_id, redirectUri: redirect_uri,
+        codeChallenge: code_challenge, state: state ?? '', scope: scope ?? '', resource: resource ?? '',
+        sig, error: 'Incorrect password',
       }));
       return;
     }
+
     const code = provider.issueAuthorizationCode({
-      clientId: client_id,
-      redirectUri: redirect_uri,
-      codeChallenge: code_challenge,
-      scopes: scope ?? '',
-      resource: resource ?? '',
+      clientId: client_id, redirectUri: redirect_uri, codeChallenge: code_challenge,
+      scopes: scope ?? '', resource: resource ?? '',
     });
     const redirect = new URL(redirect_uri);
     redirect.searchParams.set('code', code);
@@ -259,10 +318,16 @@ export function installOAuth(app: Express, db: StateDatabase, config: OAuthConfi
     resourceName: 'ghidra-mcp',
   }));
 
+  // Periodic sweep of expired codes/tokens (unref so it never holds the process open).
+  const sweep = setInterval(() => {
+    try { provider.pruneExpired(); } catch { /* best effort */ }
+  }, 15 * 60 * 1000);
+  sweep.unref?.();
+
   const resourceMetadataUrl = getOAuthProtectedResourceMetadataUrl(issuerUrl);
   const requireAuth = requireBearerAuth({ verifier: provider, resourceMetadataUrl });
 
-  return { requireAuth };
+  return { requireAuth, provider };
 }
 
 interface ConsentView {
@@ -271,8 +336,9 @@ interface ConsentView {
   redirectUri: string;
   codeChallenge: string;
   state: string;
-  scopes: string;
+  scope: string;
   resource: string;
+  sig: string;
   error?: string;
 }
 
@@ -307,7 +373,8 @@ function renderConsentPage(v: ConsentView): string {
   ${hidden('redirect_uri', v.redirectUri)}
   ${hidden('code_challenge', v.codeChallenge)}
   ${hidden('state', v.state)}
-  ${hidden('scope', v.scopes)}
+  ${hidden('scope', v.scope)}
   ${hidden('resource', v.resource)}
+  ${hidden('sig', v.sig)}
 </form></body></html>`;
 }
