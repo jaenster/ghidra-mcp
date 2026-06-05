@@ -18,6 +18,7 @@ import java.util.*;
 import java.util.regex.Pattern;
 
 import ghidra.framework.model.ProjectData;
+import ghidra.framework.model.DomainFile;
 
 /**
  * Shared state and utility methods for all operation classes.
@@ -37,6 +38,8 @@ public class GhidraContext {
     private final String projectPath;
     private final Logger log;
     private boolean readOnly = false;
+    // Checked-out server DomainFile (Ghidra Server write mode). Null for local projects.
+    private DomainFile serverFile;
     private static boolean jythonInitialized = false;
     private long cacheVersion = 0;
 
@@ -65,6 +68,7 @@ public class GhidraContext {
     public boolean isReadOnly() { return readOnly; }
     public GhidraProject getProject() { return project; }
     public ProjectData getProjectData() { return projectData; }
+    public DomainFile getServerFile() { return serverFile; }
     public String getActiveProgramPath() { return activeProgramPath; }
     public Map<String, Program> getPrograms() { return programs; }
     public Map<String, DecompInterface> getDecompilers() { return decompilers; }
@@ -85,6 +89,7 @@ public class GhidraContext {
     public void setDecompiler(DecompInterface decompiler) { this.decompiler = decompiler; }
     public void setProject(GhidraProject project) { this.project = project; }
     public void setProjectData(ProjectData projectData) { this.projectData = projectData; }
+    public void setServerFile(DomainFile serverFile) { this.serverFile = serverFile; }
     public void setReadOnly(boolean readOnly) { this.readOnly = readOnly; }
 
     // ============== Multi-program management ==============

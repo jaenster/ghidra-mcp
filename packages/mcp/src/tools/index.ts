@@ -139,6 +139,19 @@ export const sessionTools: ToolDefinition[] = [
   ),
 
   defineTool(
+    'commit',
+    'Check in (commit) a Ghidra Server session as a new server version. Saves the working copy, then performs a Ghidra check-in with the given message, keeping the checkout so editing can continue. Only valid for writable Ghidra Server sessions.',
+    {
+      ...sessionIdProp,
+      message: {
+        type: 'string',
+        description: 'Commit message describing the changes (becomes the server version comment)',
+      },
+    },
+    ['message']
+  ),
+
+  defineTool(
     'set_default_session',
     'Set the default session for subsequent tool calls.',
     {

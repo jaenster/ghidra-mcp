@@ -92,6 +92,10 @@ public class CommandHandler {
             case "save":
                 return handleSave();
 
+            case "checkin":
+            case "commit":
+                return handleCheckin(params);
+
             case "create_structure":
                 return handleCreateStructure(params);
 
@@ -653,6 +657,16 @@ public class CommandHandler {
 
         JsonObject result = new JsonObject();
         result.addProperty("success", true);
+        return result;
+    }
+
+    private JsonObject handleCheckin(JsonObject params) throws Exception {
+        String message = getString(params, "message", null);
+        String status = engine.commit(message);
+
+        JsonObject result = new JsonObject();
+        result.addProperty("success", true);
+        result.addProperty("message", status);
         return result;
     }
 

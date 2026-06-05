@@ -184,8 +184,9 @@ export class SessionManager {
 
   /**
    * Create a session backed by a Ghidra Server shared repository.
-   * The binaryPath is a ghidra:// URL; the worker connects to the server and
-   * opens the shared program read-only. Dedup keys off the URL string hash.
+   * The binaryPath is a ghidra:// URL; the worker connects to the server and opens
+   * the shared program checked-out (writable) unless readOnly is set. Dedup keys off
+   * the URL string hash.
    */
   private async createServerSession(
     url: string,

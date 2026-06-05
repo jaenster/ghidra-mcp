@@ -1207,6 +1207,15 @@ export class GhidraToolHandler {
       case 'save_session':
         return { id, command: 'save', params: {}, timeout };
 
+      // Commit (Ghidra Server check-in)
+      case 'commit':
+        return {
+          id,
+          command: 'checkin',
+          params: { message: params.message as string },
+          timeout,
+        };
+
       // Type archive
       case 'export_type_archive':
         return {

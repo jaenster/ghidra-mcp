@@ -397,8 +397,8 @@ public class Worker {
                                  "  (password supplied via GHIDRA_SERVER_PASSWORD env var)");
                 System.exit(1);
             }
-            // Server programs are opened read-only for now (no check-out/write support yet).
-            readOnly = true;
+            // Server programs open writable (checked-out) by default; pass --read-only to
+            // open read-only without acquiring a checkout.
             // The Ghidra Server runs with nameAllowed=false, so the login identity is taken
             // from the JVM user.name. This MUST be set before Ghidra initializes (Application
             // init caches the username), otherwise we'd authenticate as the container's OS

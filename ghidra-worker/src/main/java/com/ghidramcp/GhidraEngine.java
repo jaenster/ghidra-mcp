@@ -100,6 +100,11 @@ public class GhidraEngine {
         projectOps.save();
     }
 
+    /** Check in (commit) the checked-out server program as a new server version. */
+    public String commit(String message) throws Exception {
+        return projectOps.checkinServerProgram(message);
+    }
+
     public void close(boolean save) {
         projectOps.close(save);
     }

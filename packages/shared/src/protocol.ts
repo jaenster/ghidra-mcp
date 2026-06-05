@@ -83,6 +83,7 @@ export type WorkerCommand =
   | FindFunctionsMatchingCommand
   | TraceDataFlowCommand
   | SaveCommand
+  | CheckinCommand
   | ShutdownCommand
   // New modification commands
   | AddBookmarkCommand
@@ -737,6 +738,14 @@ export interface SaveCommand extends BaseCommand {
   params: Record<string, never>;
 }
 
+// Check-in (commit) command — Ghidra Server only
+export interface CheckinCommand extends BaseCommand {
+  command: 'checkin';
+  params: {
+    message: string;
+  };
+}
+
 // Shutdown command
 export interface ShutdownCommand extends BaseCommand {
   command: 'shutdown';
@@ -1074,6 +1083,7 @@ export type CommandResultMap = {
   'find_functions_matching': { functions: FunctionInfo[] };
   'trace_data_flow': { flow: DataFlowNode[] };
   'save': { success: boolean };
+  'checkin': { success: boolean; message: string };
   'shutdown': { success: boolean };
   'list_equates': { equates: Array<{ name: string; value: number; hexValue: string; referenceCount: number; references: string[] }>; total: number };
   'set_equate': { success: boolean };

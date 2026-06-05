@@ -267,8 +267,9 @@ public class ProjectOps {
      * supplied server user id before installing the authenticator so the server sees
      * the right identity.
      *
-     * The program is opened read-only by default so the production repository is never
-     * locked or written to.
+     * When readOnly is false the program is checked out (non-exclusive) and opened
+     * writable.  The working copy is backed by a persistent local shared project on the
+     * pod's /data PVC so the checkout (and any unsaved edits) survive worker restarts.
      */
     public void openServerProgram(String host, int port, String repoName, String programPath,
                                   String user, char[] password, boolean readOnly) throws Exception {
@@ -301,69 +302,113 @@ public class ProjectOps {
         }
         log.info("Connected to repository '" + repoName + "', itemCount=" + repo.getItemCount());
 
-        // Build the program URL and open the shared DomainFile via the ghidra:// protocol.
-        java.net.URL programUrl =
-                ghidra.framework.protocol.ghidra.GhidraURL.makeURL(host, port, repoName, programPath);
-        log.info("Opening shared program URL: " + programUrl);
+        // Open (or create) a persistent local shared project on the /data PVC that is linked
+        // to the repository.  This gives checkout/checkin a real project to work against and
+        // keeps the working copy on disk across worker restarts.
+        File projectRoot = new File("/data/ghidra-projects");
+        if (!projectRoot.exists()) {
+            projectRoot.mkdirs();
+        }
+        ProjectLocator locator = new ProjectLocator(projectRoot.getAbsolutePath(), repoName);
+        // DefaultProjectData(locator, repo, resetOwner=false) opens the project if it already
+        // exists on disk (reusing the prior checkout state), otherwise creates it linked to repo.
+        DefaultProjectData projectData = new DefaultProjectData(locator, repo, false);
+        ctx.setProjectData(projectData);
 
-        final boolean ro = readOnly;
-        final java.util.concurrent.atomic.AtomicReference<Program> progRef =
-                new java.util.concurrent.atomic.AtomicReference<>();
-        final java.util.concurrent.atomic.AtomicReference<DomainFile> fileRef =
-                new java.util.concurrent.atomic.AtomicReference<>();
-
-        ghidra.framework.protocol.ghidra.GhidraURLResultHandler handler =
-                new ghidra.framework.protocol.ghidra.GhidraURLResultHandler() {
-            @Override
-            public void processResult(DomainFile df, java.net.URL url, ghidra.util.task.TaskMonitor m)
-                    throws IOException {
-                fileRef.set(df);
-                try {
-                    Program p;
-                    if (ro) {
-                        p = (Program) df.getReadOnlyDomainObject(ctx, DomainFile.DEFAULT_VERSION, m);
-                    } else {
-                        // okToUpgrade=false: server and programs are the same Ghidra version.
-                        p = (Program) df.getDomainObject(ctx, false, false, m);
-                    }
-                    progRef.set(p);
-                } catch (Exception e) {
-                    throw new IOException("Failed to open domain object: " + e.getMessage(), e);
-                }
-            }
-            @Override
-            public void processResult(DomainFolder folder, java.net.URL url, ghidra.util.task.TaskMonitor m) {
-                // Not expected when querying a program URL.
-            }
-            @Override
-            public void handleError(String title, String message, java.net.URL url, IOException cause)
-                    throws IOException {
-                if (cause != null) throw cause;
-                throw new IOException(title + ": " + message);
-            }
-        };
-
-        ghidra.framework.protocol.ghidra.GhidraURLQuery.queryUrl(
-                programUrl, Program.class, handler,
-                ghidra.framework.protocol.ghidra.GhidraURLQuery.LinkFileControl.FOLLOW_EXTERNAL,
-                ctx.getMonitor());
-
-        Program program = progRef.get();
-        if (program == null) {
-            throw new IOException("Program not found or could not be opened: " + programPath +
-                                  " in repository " + repoName);
+        ghidra.util.task.TaskMonitor monitor = ctx.getMonitor();
+        DomainFile df = projectData.getFile(programPath);
+        if (df == null) {
+            throw new IOException("Program not found in repository " + repoName + ": " + programPath);
         }
 
-        DomainFile df = fileRef.get();
-        String path = df != null ? df.getPathname() : programPath;
+        Program program;
+        if (readOnly) {
+            program = (Program) df.getReadOnlyDomainObject(ctx, DomainFile.DEFAULT_VERSION, monitor);
+        } else {
+            // Check out (non-exclusive) so we can edit and later check-in new versions.
+            if (df.isVersioned() && !df.isCheckedOut()) {
+                log.info("Checking out (non-exclusive): " + df.getPathname());
+                boolean ok = df.checkout(false, monitor);
+                if (!ok) {
+                    throw new IOException("Checkout failed (already checked out exclusively?): "
+                                          + df.getPathname());
+                }
+            }
+            ctx.setServerFile(df);
+            // okToUpgrade=false: server and programs are the same Ghidra version.
+            program = (Program) df.getDomainObject(ctx, false, false, monitor);
+        }
 
+        String path = df.getPathname();
         ctx.setProgram(program);
         ctx.setFlatApi(new FlatProgramAPI(program));
         initializeDecompiler();
         ctx.registerProgram(path, program, ctx.getFlatApi(), ctx.getDecompiler());
 
         log.info("Shared program opened successfully: " + program.getName() +
-                 " (" + program.getFunctionManager().getFunctionCount() + " functions)");
+                 " (" + program.getFunctionManager().getFunctionCount() + " functions, checkedOut=" +
+                 df.isCheckedOut() + ")");
+    }
+
+    /**
+     * Check in (commit) the checked-out server program as a new server version.
+     * Saves the working copy first, then performs a Ghidra check-in keeping the checkout
+     * so editing can continue.  For a file that is in the project but not yet under version
+     * control, it is added to version control instead (creates version 1).
+     *
+     * Returns a human-readable status string.
+     */
+    public String checkinServerProgram(String message) throws Exception {
+        Logger log = ctx.getLog();
+        DomainFile df = ctx.getServerFile();
+        if (df == null) {
+            throw new IllegalStateException("No checked-out server program; commit is only available "
+                                            + "for writable Ghidra Server sessions.");
+        }
+        if (message == null || message.isEmpty()) {
+            message = "MCP commit";
+        }
+
+        ghidra.util.task.TaskMonitor monitor = ctx.getMonitor();
+        Program program = ctx.getProgram();
+
+        // Flush any open transactions and persist the working copy to disk first.
+        ctx.cleanupOrphanedTransactions("pre-commit");
+        if (program != null && program.isChanged()) {
+            program.save("MCP auto-save", monitor);
+        }
+        df.save(monitor);
+
+        // File exists in the project but is not yet versioned → first check-in adds it.
+        if (!df.isVersioned()) {
+            log.info("Adding to version control: " + df.getPathname());
+            df.addToVersionControl(message, true /*keepCheckedOut*/, monitor);
+            return "Added to version control: " + df.getPathname() + " (version " + df.getVersion() + ")";
+        }
+
+        if (!df.isCheckedOut()) {
+            throw new IllegalStateException("Program is not checked out; cannot check in: "
+                                            + df.getPathname());
+        }
+        if (!df.modifiedSinceCheckout()) {
+            return "Nothing to commit (no changes since checkout): " + df.getPathname();
+        }
+
+        final String comment = message;
+        ghidra.framework.data.CheckinHandler handler = new ghidra.framework.data.CheckinHandler() {
+            @Override
+            public String getComment() { return comment; }
+            @Override
+            public boolean keepCheckedOut() { return true; }
+            @Override
+            public boolean createKeepFile() { return false; }
+        };
+
+        log.info("Checking in: " + df.getPathname() + " — " + comment);
+        df.checkin(handler, monitor);
+        int version = df.getVersion();
+        log.info("Check-in complete: " + df.getPathname() + " version=" + version);
+        return "Committed " + df.getPathname() + " as version " + version;
     }
 
     // ============== Save / Close ==============
@@ -374,13 +419,26 @@ public class ProjectOps {
      */
     public void save() throws Exception {
         GhidraProject project = ctx.getProject();
+        DomainFile serverFile = ctx.getServerFile();
+
+        // Clean up any orphaned transactions on active program
+        ctx.cleanupOrphanedTransactions("pre-save");
+
+        // Ghidra Server (checked-out) mode: persist the working copy on disk. No GhidraProject.
+        if (serverFile != null) {
+            Program program = ctx.getProgram();
+            if (program != null && program.isChanged()) {
+                ctx.getLog().info("Saving checked-out working copy: " + serverFile.getPathname());
+                program.save("MCP auto-save", ctx.getMonitor());
+            }
+            serverFile.save(ctx.getMonitor());
+            ctx.getLog().info("Save complete (working copy)");
+            return;
+        }
 
         if (project == null) {
             throw new IllegalStateException("No project loaded");
         }
-
-        // Clean up any orphaned transactions on active program
-        ctx.cleanupOrphanedTransactions("pre-save");
 
         // Save all loaded programs
         java.util.Map<String, Program> programs = ctx.getPrograms();
