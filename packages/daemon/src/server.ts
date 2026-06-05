@@ -495,6 +495,24 @@ export async function createServer(options: ServerOptions): Promise<{
     let transport = sessionId ? activeStreamableTransports.get(sessionId) : undefined;
 
     if (!transport) {
+      const body = req.body;
+      const isInitialize = req.method === 'POST' && body != null &&
+        (Array.isArray(body) ? body.some((m) => m?.method === 'initialize') : body.method === 'initialize');
+
+      // A request carrying an mcp-session-id we don't recognize means the client's
+      // session is gone — almost always because the daemon restarted and the in-memory
+      // transport map was wiped. The MCP spec says respond 404 so the client knows to
+      // re-initialize (start a fresh session). Returning 400 here left clients (incl.
+      // claude.ai) stuck on the dead session forever, even after "reconnect".
+      if (sessionId && !isInitialize) {
+        res.status(404).json({
+          jsonrpc: '2.0',
+          error: { code: -32001, message: 'Session not found — reinitialize' },
+          id: (body && !Array.isArray(body) ? body.id : null) ?? null,
+        });
+        return;
+      }
+
       // New session - only allowed for POST with initialize request
       if (req.method !== 'POST') {
         res.status(400).json({
