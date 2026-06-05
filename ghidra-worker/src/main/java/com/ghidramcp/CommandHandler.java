@@ -1854,7 +1854,12 @@ public class CommandHandler {
         if (programPath == null) {
             throw new IllegalArgumentException("programPath is required");
         }
-        engine.loadAdditionalProgram(programPath);
+        // Server-backed worker: load from the already-open repository project (no .gpr lock).
+        if (engine.isServerMode()) {
+            engine.loadServerProgram(programPath);
+        } else {
+            engine.loadAdditionalProgram(programPath);
+        }
         JsonObject result = new JsonObject();
         result.addProperty("success", true);
         result.addProperty("programPath", programPath);

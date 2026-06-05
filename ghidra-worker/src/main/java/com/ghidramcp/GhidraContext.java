@@ -38,8 +38,10 @@ public class GhidraContext {
     private final String projectPath;
     private final Logger log;
     private boolean readOnly = false;
-    // Checked-out server DomainFile (Ghidra Server write mode). Null for local projects.
-    private DomainFile serverFile;
+    // Checked-out server DomainFiles (Ghidra Server write mode), keyed by program path.
+    // One worker can hold several programs from the same repo; save/commit target the
+    // active program's file. Empty for local projects.
+    private final Map<String, DomainFile> serverFiles = new HashMap<>();
     // Active writable shared project (Ghidra Server write mode). Held so it can be closed on
     // shutdown. Null for local projects (which use the GhidraProject wrapper instead).
     private ghidra.framework.model.Project serverProject;
@@ -71,7 +73,13 @@ public class GhidraContext {
     public boolean isReadOnly() { return readOnly; }
     public GhidraProject getProject() { return project; }
     public ProjectData getProjectData() { return projectData; }
-    public DomainFile getServerFile() { return serverFile; }
+    /** DomainFile for the currently-active server program, or null if none. */
+    public DomainFile getServerFile() {
+        return activeProgramPath != null ? serverFiles.get(activeProgramPath) : null;
+    }
+    public Map<String, DomainFile> getServerFiles() { return serverFiles; }
+    /** True when this worker is backed by an open Ghidra Server project. */
+    public boolean isServerMode() { return serverProject != null; }
     public ghidra.framework.model.Project getServerProject() { return serverProject; }
     public String getActiveProgramPath() { return activeProgramPath; }
     public Map<String, Program> getPrograms() { return programs; }
@@ -93,7 +101,8 @@ public class GhidraContext {
     public void setDecompiler(DecompInterface decompiler) { this.decompiler = decompiler; }
     public void setProject(GhidraProject project) { this.project = project; }
     public void setProjectData(ProjectData projectData) { this.projectData = projectData; }
-    public void setServerFile(DomainFile serverFile) { this.serverFile = serverFile; }
+    /** Register the checked-out DomainFile for a server program, keyed by its path. */
+    public void putServerFile(String path, DomainFile serverFile) { this.serverFiles.put(path, serverFile); }
     public void setServerProject(ghidra.framework.model.Project serverProject) { this.serverProject = serverProject; }
     public void setReadOnly(boolean readOnly) { this.readOnly = readOnly; }
 

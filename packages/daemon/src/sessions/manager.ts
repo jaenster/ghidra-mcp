@@ -220,6 +220,26 @@ export class SessionManager {
       }
     }
 
+    // Reuse one worker per repo (host+port+repo). The first program for a repo opens the
+    // server project (which Ghidra locks exclusively on /data); a second program from the
+    // SAME repo must NOT spawn a second worker (it would fail to lock the same dir). Instead
+    // reuse the existing worker and load_program the repo-relative path into the open project.
+    let existingWorkerId: string | undefined;
+    for (const [, existingState] of this.sessions) {
+      const s = existingState.ghidraServer;
+      if (
+        s &&
+        existingState.workerId &&
+        existingState.status === 'ready' &&
+        s.host === ghidraServer.host &&
+        s.port === ghidraServer.port &&
+        s.repo === ghidraServer.repo
+      ) {
+        existingWorkerId = existingState.workerId;
+        break;
+      }
+    }
+
     const sessionId = crypto.randomUUID();
     // Server sessions still need a local project dir for the worker's transient project.
     const projectPath = path.join(getProjectsDir(), sessionId);
@@ -240,6 +260,25 @@ export class SessionManager {
     this.database.saveSession(sessionId, state);
 
     try {
+      if (existingWorkerId) {
+        // Reuse existing repo worker — load the additional program into the open project.
+        // For server workers the program to load is the repo-relative program path.
+        console.log(`[SessionManager] Reusing server worker ${existingWorkerId} for program ${programPath}`);
+        state.workerId = existingWorkerId;
+        state.status = 'analyzing';
+
+        const loadCmd: WorkerCommand = {
+          id: crypto.randomUUID(),
+          command: 'load_program',
+          params: { programPath },
+          timeout: 60000,
+        };
+        await this.workerPool.sendCommand(existingWorkerId, loadCmd);
+        state.status = 'ready';
+
+        return this.toSession(sessionId, state);
+      }
+
       const workerId = await this.workerPool.spawnWorker(sessionId, {
         binaryPath: url,
         projectPath,

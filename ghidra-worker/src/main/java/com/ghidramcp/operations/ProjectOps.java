@@ -355,12 +355,14 @@ public class ProjectOps {
                                           + df.getPathname());
                 }
             }
-            ctx.setServerFile(df);
             // okToUpgrade=false: server and programs are the same Ghidra version.
             program = (Program) df.getDomainObject(ctx, false, false, monitor);
         }
 
         String path = df.getPathname();
+        if (!readOnly) {
+            ctx.putServerFile(path, df);
+        }
         ctx.setProgram(program);
         ctx.setFlatApi(new FlatProgramAPI(program));
         initializeDecompiler();
@@ -625,6 +627,13 @@ public class ProjectOps {
         return ctx.isReadOnly();
     }
 
+    /**
+     * Check if this engine is backed by an open Ghidra Server project.
+     */
+    public boolean isServerMode() {
+        return ctx.isServerMode();
+    }
+
     // ============== Multi-program operations ==============
 
     /**
@@ -669,6 +678,57 @@ public class ProjectOps {
 
         ctx.registerProgram(programFile.getPathname(), program, flatApi, decompiler);
         log.info("Additional program loaded: " + programFile.getPathname());
+    }
+
+    /**
+     * Load an additional program from the already-open Ghidra Server project.
+     * Reuses the project/ProjectData held on the context (no new project open, no new
+     * lock), checks the program out non-exclusively if needed, and registers it in the
+     * multi-program maps so CommandHandler can switch to it via _programPath.
+     */
+    public void loadServerProgram(String programPath) throws Exception {
+        Logger log = ctx.getLog();
+        ProjectData projectData = ctx.getProjectData();
+        if (projectData == null || ctx.getServerProject() == null) {
+            throw new IllegalStateException("No server project open");
+        }
+
+        ghidra.util.task.TaskMonitor monitor = ctx.getMonitor();
+        DomainFile df = projectData.getFile(programPath);
+        if (df == null) {
+            throw new IOException("Program not found in server project: " + programPath);
+        }
+        String path = df.getPathname();
+
+        // Already loaded → just make it active.
+        if (ctx.getPrograms().containsKey(path)) {
+            log.info("Server program already loaded: " + path);
+            ctx.switchProgram(path);
+            return;
+        }
+
+        log.info("Loading additional server program: " + path);
+        Program program;
+        if (ctx.isReadOnly()) {
+            program = (Program) df.getReadOnlyDomainObject(ctx, DomainFile.DEFAULT_VERSION, monitor);
+        } else {
+            if (df.isVersioned() && !df.isCheckedOut()) {
+                log.info("Checking out (non-exclusive): " + path);
+                boolean ok = df.checkout(false, monitor);
+                if (!ok) {
+                    throw new IOException("Checkout failed (already checked out exclusively?): " + path);
+                }
+            }
+            ctx.putServerFile(path, df);
+            program = (Program) df.getDomainObject(ctx, false, false, monitor);
+        }
+
+        FlatProgramAPI flatApi = new FlatProgramAPI(program);
+        DecompInterface decompiler = createDecompiler(program);
+        ctx.registerProgram(path, program, flatApi, decompiler);
+        log.info("Additional server program loaded: " + path + " (" +
+                 program.getFunctionManager().getFunctionCount() + " functions, checkedOut=" +
+                 df.isCheckedOut() + ")");
     }
 
     /**

@@ -75,6 +75,16 @@ public class GhidraEngine {
         projectOps.loadAdditionalProgram(programPath);
     }
 
+    /** Load an additional program from the already-open Ghidra Server project. */
+    public void loadServerProgram(String programPath) throws Exception {
+        projectOps.loadServerProgram(programPath);
+    }
+
+    /** True when this worker holds an open Ghidra Server project. */
+    public boolean isServerMode() {
+        return projectOps.isServerMode();
+    }
+
     /**
      * Connect to a remote Ghidra Server and open a shared program from a repository.
      * Opens read-only by default to avoid locking/writing the production repository.
