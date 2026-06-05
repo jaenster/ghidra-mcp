@@ -1,119 +1,23 @@
+# Lean CI: build the pnpm workspace, typecheck, and run the Ghidra-free OAuth
+# e2e tests. (The image build lives in build.yml; the heavy Ghidra analysis e2e
+# suites need fixtures and run locally.)
 name: CI
-
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
 
-env:
-  GHIDRA_VERSION: "12.0.2"
-  GHIDRA_DATE: "20260129"
-  NODE_VERSION: "20"
-  JAVA_VERSION: "21"
-
 jobs:
-  build-and-test:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Java ${{ env.JAVA_VERSION }}
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: ${{ env.JAVA_VERSION }}
-
-      - name: Setup Node.js ${{ env.NODE_VERSION }}
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: 'npm'
-
-      - name: Cache Ghidra
-        id: cache-ghidra
-        uses: actions/cache@v4
-        with:
-          path: ghidra_${{ env.GHIDRA_VERSION }}_PUBLIC
-          key: ghidra-${{ env.GHIDRA_VERSION }}-${{ env.GHIDRA_DATE }}
-
-      - name: Download Ghidra
-        if: steps.cache-ghidra.outputs.cache-hit != 'true'
-        run: |
-          curl -L -o ghidra.zip "https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_${GHIDRA_VERSION}_build/ghidra_${GHIDRA_VERSION}_PUBLIC_${GHIDRA_DATE}.zip"
-          unzip -q ghidra.zip
-          rm ghidra.zip
-
-      - name: Set GHIDRA_HOME
-        run: echo "GHIDRA_HOME=${{ github.workspace }}/ghidra_${{ env.GHIDRA_VERSION }}_PUBLIC" >> $GITHUB_ENV
-
-      - name: Cache Gradle packages
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-            ghidra-worker/.gradle
-          key: gradle-${{ runner.os }}-${{ hashFiles('ghidra-worker/**/*.gradle*', 'ghidra-worker/**/gradle-wrapper.properties') }}
-          restore-keys: |
-            gradle-${{ runner.os }}-
-
-      - name: Build Java worker
-        run: |
-          cd ghidra-worker
-          ./gradlew jar --no-daemon
-
-      - name: Install npm dependencies
-        run: npm ci
-
-      - name: Build TypeScript packages
-        run: npm run build
-
-      - name: Type check
-        run: npm run typecheck
-
-      - name: Lint
-        run: npm run lint || echo "Lint not configured, skipping"
-        continue-on-error: true
-
-      - name: Build test fixtures
-        run: npm run fixtures:build
-
-      - name: Run unit tests
-        run: npm run test:unit || true  # Some packages may not have tests yet
-
-      - name: Run E2E tests
-        run: npm run test:e2e
-        timeout-minutes: 10
-
-  # Quick lint/typecheck job for fast feedback
-  lint:
+  check:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js ${{ env.NODE_VERSION }}
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: 'npm'
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build packages
-        run: npm run build
-
-      - name: Type check
-        run: npm run typecheck
-
-      - name: Lint
-        run: npm run lint || echo "Lint not configured, skipping"
-        continue-on-error: true
+          node-version: 22
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm -r build
+      - run: pnpm run typecheck
+      - run: node --test --test-timeout=120000 --import tsx test/e2e/auth.test.ts
