@@ -40,6 +40,18 @@ import java.util.List;
 public class ProjectOps {
     private final GhidraContext ctx;
 
+    /**
+     * Minimal ProjectManager that exposes DefaultProjectManager's protected constructor so we can
+     * open/create a shared project as the active writable project (the same trick Ghidra's
+     * HeadlessAnalyzer uses via HeadlessGhidraProjectManager).  A project opened this way is a
+     * "writable project", which is required for checkout/checkin against a Ghidra Server.
+     */
+    private static class WorkerProjectManager extends ghidra.framework.project.DefaultProjectManager {
+        WorkerProjectManager() {
+            super();
+        }
+    }
+
     public ProjectOps(GhidraContext ctx) {
         this.ctx = ctx;
     }
@@ -310,9 +322,18 @@ public class ProjectOps {
             projectRoot.mkdirs();
         }
         ProjectLocator locator = new ProjectLocator(projectRoot.getAbsolutePath(), repoName);
-        // DefaultProjectData(locator, repo, resetOwner=false) opens the project if it already
-        // exists on disk (reusing the prior checkout state), otherwise creates it linked to repo.
-        DefaultProjectData projectData = new DefaultProjectData(locator, repo, false);
+
+        // A directly-constructed DefaultProjectData is NOT a writable project, so checkout()
+        // throws ReadOnlyException.  Replicate Ghidra's HeadlessAnalyzer: open the project as the
+        // active writable project through a DefaultProjectManager subclass.  If the project dir
+        // already exists on disk we open it (resetOwner=false, doRestore=true) to reuse the prior
+        // checkout state; otherwise we create it linked to the repository.
+        WorkerProjectManager pm = new WorkerProjectManager();
+        Project project = locator.exists()
+                ? pm.openProject(locator, false, true)
+                : pm.createProject(locator, repo, false);
+        ctx.setServerProject(project);
+        ProjectData projectData = project.getProjectData();
         ctx.setProjectData(projectData);
 
         ghidra.util.task.TaskMonitor monitor = ctx.getMonitor();
@@ -547,7 +568,21 @@ public class ProjectOps {
             ctx.setProject(null);
         }
 
-        if (projectData != null) {
+        // Active writable shared project (Ghidra Server write mode). Closing the Project also
+        // closes its underlying ProjectData, so do this instead of closing projectData directly
+        // when a serverProject is held.
+        Project serverProject = ctx.getServerProject();
+        if (serverProject != null) {
+            try {
+                if (!serverProject.isClosed()) {
+                    serverProject.close();
+                }
+            } catch (Exception e) {
+                log.warn("Error closing server project: " + e.getMessage());
+            }
+            ctx.setServerProject(null);
+            ctx.setProjectData(null);
+        } else if (projectData != null) {
             try {
                 projectData.close();
             } catch (Exception e) {

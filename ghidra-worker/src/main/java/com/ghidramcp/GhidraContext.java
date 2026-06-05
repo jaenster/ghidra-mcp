@@ -40,6 +40,9 @@ public class GhidraContext {
     private boolean readOnly = false;
     // Checked-out server DomainFile (Ghidra Server write mode). Null for local projects.
     private DomainFile serverFile;
+    // Active writable shared project (Ghidra Server write mode). Held so it can be closed on
+    // shutdown. Null for local projects (which use the GhidraProject wrapper instead).
+    private ghidra.framework.model.Project serverProject;
     private static boolean jythonInitialized = false;
     private long cacheVersion = 0;
 
@@ -69,6 +72,7 @@ public class GhidraContext {
     public GhidraProject getProject() { return project; }
     public ProjectData getProjectData() { return projectData; }
     public DomainFile getServerFile() { return serverFile; }
+    public ghidra.framework.model.Project getServerProject() { return serverProject; }
     public String getActiveProgramPath() { return activeProgramPath; }
     public Map<String, Program> getPrograms() { return programs; }
     public Map<String, DecompInterface> getDecompilers() { return decompilers; }
@@ -90,6 +94,7 @@ public class GhidraContext {
     public void setProject(GhidraProject project) { this.project = project; }
     public void setProjectData(ProjectData projectData) { this.projectData = projectData; }
     public void setServerFile(DomainFile serverFile) { this.serverFile = serverFile; }
+    public void setServerProject(ghidra.framework.model.Project serverProject) { this.serverProject = serverProject; }
     public void setReadOnly(boolean readOnly) { this.readOnly = readOnly; }
 
     // ============== Multi-program management ==============
