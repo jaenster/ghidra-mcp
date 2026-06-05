@@ -329,9 +329,25 @@ public class ProjectOps {
         // already exists on disk we open it (resetOwner=false, doRestore=true) to reuse the prior
         // checkout state; otherwise we create it linked to the repository.
         WorkerProjectManager pm = new WorkerProjectManager();
-        Project project = locator.exists()
-                ? pm.openProject(locator, false, true)
-                : pm.createProject(locator, repo, false);
+        Project project;
+        try {
+            project = locator.exists()
+                    ? pm.openProject(locator, false, true)
+                    : pm.createProject(locator, repo, false);
+        } catch (ghidra.framework.store.LockException le) {
+            // The daemon reuses ONE worker per repo, so it only spawns a fresh worker when no
+            // live worker holds this project. Any lock here is therefore a STALE lock left by a
+            // worker that was killed (pod restart / crash) without releasing it — safe to clear.
+            File lockFile = locator.getProjectLockFile();
+            ctx.getLog().warn("Stale project lock (dead worker), clearing and retrying: " +
+                    (lockFile != null ? lockFile.getAbsolutePath() : locator.getName()) + " — " + le.getMessage());
+            if (lockFile != null && lockFile.exists()) {
+                lockFile.delete();
+            }
+            project = locator.exists()
+                    ? pm.openProject(locator, false, true)
+                    : pm.createProject(locator, repo, false);
+        }
         ctx.setServerProject(project);
         ProjectData projectData = project.getProjectData();
         ctx.setProjectData(projectData);
