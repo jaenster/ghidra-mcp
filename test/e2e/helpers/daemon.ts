@@ -32,9 +32,16 @@ export interface TestBinary {
 }
 
 /**
- * Start the daemon for testing
+ * Start the daemon for testing.
+ *
+ * @param port  Listen port (defaults to 18432).
+ * @param env   Extra environment overrides merged over process.env — used by
+ *              the auth test to enable OAuth and isolate the app data dir.
  */
-export async function startTestDaemon(port = 18432): Promise<DaemonHandle> {
+export async function startTestDaemon(
+  port = 18432,
+  env?: Record<string, string>
+): Promise<DaemonHandle> {
   const cliPath = path.join(PROJECT_ROOT, 'packages', 'cli', 'dist', 'index.js');
 
   if (!fs.existsSync(cliPath)) {
@@ -50,6 +57,7 @@ export async function startTestDaemon(port = 18432): Promise<DaemonHandle> {
       env: {
         ...process.env,
         GHIDRA_MCP_PORT: String(port),
+        ...env,
       },
       stdio: ['pipe', 'pipe', 'pipe'],
       detached: false,
