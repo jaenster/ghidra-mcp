@@ -75,6 +75,15 @@ public class GhidraEngine {
         projectOps.loadAdditionalProgram(programPath);
     }
 
+    /**
+     * Connect to a remote Ghidra Server and open a shared program from a repository.
+     * Opens read-only by default to avoid locking/writing the production repository.
+     */
+    public void openServerProgram(String host, int port, String repo, String programPath,
+                                  String user, char[] password, boolean readOnly) throws Exception {
+        projectOps.openServerProgram(host, port, repo, programPath, user, password, readOnly);
+    }
+
     public JsonArray listPrograms() throws Exception {
         return projectOps.listProjectPrograms();
     }

@@ -35,6 +35,12 @@ public class Worker {
     private final int analysisTimeout;
     private final boolean readOnly;
 
+    // Ghidra Server (remote shared project) load mode
+    private final String serverHostPort;  // "host:port" — when set, server load is used
+    private final String serverRepo;
+    private final String serverProgram;   // path within the repo
+    private final String serverUser;
+
     private GhidraEngine engine;
     private DaemonClient client;
     private Logger log;
@@ -42,7 +48,8 @@ public class Worker {
 
     public Worker(String workerId, String sessionId, String daemonUrl,
                   String binaryPath, String projectPath, String programPath,
-                  boolean autoAnalyze, int analysisTimeout, boolean readOnly) {
+                  boolean autoAnalyze, int analysisTimeout, boolean readOnly,
+                  String serverHostPort, String serverRepo, String serverProgram, String serverUser) {
         this.workerId = workerId;
         this.sessionId = sessionId;
         this.daemonUrl = daemonUrl;
@@ -52,6 +59,10 @@ public class Worker {
         this.autoAnalyze = autoAnalyze;
         this.analysisTimeout = analysisTimeout;
         this.readOnly = readOnly;
+        this.serverHostPort = serverHostPort;
+        this.serverRepo = serverRepo;
+        this.serverProgram = serverProgram;
+        this.serverUser = serverUser;
     }
 
     public void run() throws Exception {
@@ -77,6 +88,28 @@ public class Worker {
             log.info("Initializing Ghidra...");
             engine = new GhidraEngine(projectPath, log.child("GhidraEngine"));
 
+            if (serverHostPort != null) {
+                // Connect to a remote Ghidra Server and open a shared program (read-only).
+                String[] hp = serverHostPort.split(":", 2);
+                String host = hp[0];
+                int port = hp.length > 1 ? Integer.parseInt(hp[1]) : 13100;
+                String password = System.getenv("GHIDRA_SERVER_PASSWORD");
+                if (password == null || password.isEmpty()) {
+                    throw new IllegalStateException(
+                        "GHIDRA_SERVER_PASSWORD environment variable is required for --ghidra-server");
+                }
+                log.info("Opening shared program from Ghidra Server " + host + ":" + port +
+                         " repo=" + serverRepo + " program=" + serverProgram +
+                         " user=" + serverUser + " (read-only=" + readOnly + ")");
+                char[] pw = password.toCharArray();
+                try {
+                    engine.openServerProgram(host, port, serverRepo, serverProgram,
+                                             serverUser, pw, readOnly);
+                } finally {
+                    java.util.Arrays.fill(pw, '\0');
+                }
+                log.info("Shared program opened successfully");
+            } else {
             // Check if this is a .gpr project file or a binary
             File inputFile = new File(binaryPath);
             if (binaryPath.endsWith(".gpr")) {
@@ -95,6 +128,7 @@ public class Worker {
                 log.info("Loading binary: " + binaryPath);
                 engine.loadProgram(inputFile, autoAnalyze, analysisTimeout);
                 log.info("Binary loaded successfully");
+            }
             }
 
             // Register with daemon
@@ -299,6 +333,10 @@ public class Worker {
         boolean autoAnalyze = true;
         int analysisTimeout = 300000;
         boolean readOnly = false;
+        String serverHostPort = null;
+        String serverRepo = null;
+        String serverProgram = null;
+        String serverUser = null;
 
         for (int i = 0; i < args.length; i++) {
             switch (args[i]) {
@@ -332,12 +370,36 @@ public class Worker {
                 case "--read-only":
                     readOnly = true;
                     break;
+                case "--ghidra-server":
+                    serverHostPort = args[++i];
+                    break;
+                case "--repo":
+                    serverRepo = args[++i];
+                    break;
+                case "--program":
+                    serverProgram = args[++i];
+                    break;
+                case "--server-user":
+                    serverUser = args[++i];
+                    break;
             }
         }
 
-        // Validate required arguments
-        if (workerId == null || sessionId == null || daemonUrl == null ||
-            binaryPath == null || projectPath == null) {
+        // Validate required arguments. In Ghidra Server mode, --binary/--project are not
+        // required; instead --repo, --program and --server-user must be supplied.
+        boolean serverMode = serverHostPort != null;
+        boolean baseOk = workerId != null && sessionId != null && daemonUrl != null;
+        if (serverMode) {
+            if (!baseOk || serverRepo == null || serverProgram == null || serverUser == null) {
+                System.err.println("Usage (server mode): Worker --worker-id <id> --session-id <id> " +
+                                 "--daemon-url <url> --ghidra-server <host:port> --repo <name> " +
+                                 "--program <pathWithinRepo> --server-user <sid> [--read-only]\n" +
+                                 "  (password supplied via GHIDRA_SERVER_PASSWORD env var)");
+                System.exit(1);
+            }
+            // Server programs are opened read-only for now (no check-out/write support yet).
+            readOnly = true;
+        } else if (!baseOk || binaryPath == null || projectPath == null) {
             System.err.println("Usage: Worker --worker-id <id> --session-id <id> --daemon-url <url> " +
                              "--binary <path> --project <path> [--analyze] [--analysis-timeout <ms>]");
             System.exit(1);
@@ -346,7 +408,8 @@ public class Worker {
         try {
             Worker worker = new Worker(workerId, sessionId, daemonUrl,
                                        binaryPath, projectPath, programPath,
-                                       autoAnalyze, analysisTimeout, readOnly);
+                                       autoAnalyze, analysisTimeout, readOnly,
+                                       serverHostPort, serverRepo, serverProgram, serverUser);
             worker.run();
         } catch (Exception e) {
             System.err.println("[Worker] Fatal error: " + e.getMessage());

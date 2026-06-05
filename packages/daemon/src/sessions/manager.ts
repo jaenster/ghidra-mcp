@@ -71,6 +71,12 @@ export class SessionManager {
     binaryPath: string,
     options?: SessionCreateOptions
   ): Promise<Session> {
+    // Ghidra Server (shared repository) session: binaryPath is a ghidra:// URL
+    // rather than a local file. Skip filesystem resolution/hashing entirely.
+    if (binaryPath.startsWith('ghidra://')) {
+      return this.createServerSession(binaryPath, options);
+    }
+
     // Validate binary exists
     const resolvedPath = path.resolve(binaryPath);
     if (!fs.existsSync(resolvedPath)) {
@@ -160,6 +166,87 @@ export class SessionManager {
         autoAnalyze: options?.autoAnalyze ?? true,
         analysisTimeout: options?.analysisTimeout,
         readOnly: options?.readOnly,
+      });
+
+      state.workerId = workerId;
+      state.status = 'analyzing';
+
+      await this.workerPool.waitForReady(workerId);
+      state.status = 'ready';
+
+      return this.toSession(sessionId, state);
+    } catch (error) {
+      state.status = 'error';
+      state.error = error instanceof Error ? error.message : String(error);
+      throw error;
+    }
+  }
+
+  /**
+   * Create a session backed by a Ghidra Server shared repository.
+   * The binaryPath is a ghidra:// URL; the worker connects to the server and
+   * opens the shared program read-only. Dedup keys off the URL string hash.
+   */
+  private async createServerSession(
+    url: string,
+    options?: SessionCreateOptions
+  ): Promise<Session> {
+    const parsed = parseGhidraServerUrl(url);
+    const serverUser = process.env.GHIDRA_SERVER_USER || 'mcp';
+    const ghidraServer: GhidraServerInfo = {
+      host: parsed.host,
+      port: parsed.port,
+      repo: parsed.repo,
+      programPath: parsed.programPath,
+      serverUser,
+    };
+
+    // Dedup per-URL so repeated opens of the same shared program reuse the session.
+    const binaryHash = crypto.createHash('sha256').update(url).digest('hex');
+    const programPath = parsed.programPath;
+
+    for (const [id, state] of this.sessions) {
+      if (state.binaryPath === url || state.binaryHash === binaryHash) {
+        if (state.status === 'error' && !state.workerId) {
+          return this.respawnSession(id, state, options);
+        }
+        if (state.status !== 'error') {
+          state.clientCount++;
+          state.lastAccessedAt = new Date();
+          this.database.updateSession(id, { lastAccessedAt: state.lastAccessedAt });
+          return this.toSession(id, state);
+        }
+      }
+    }
+
+    const sessionId = crypto.randomUUID();
+    // Server sessions still need a local project dir for the worker's transient project.
+    const projectPath = path.join(getProjectsDir(), sessionId);
+
+    const state: SessionState = {
+      binaryPath: url,
+      binaryHash,
+      createdAt: new Date(),
+      lastAccessedAt: new Date(),
+      status: 'starting',
+      clientCount: 1,
+      projectPath,
+      programPath,
+      ghidraServer,
+    };
+
+    this.sessions.set(sessionId, state);
+    this.database.saveSession(sessionId, state);
+
+    try {
+      const workerId = await this.workerPool.spawnWorker(sessionId, {
+        binaryPath: url,
+        projectPath,
+        programPath,
+        autoAnalyze: options?.autoAnalyze ?? false,
+        analysisTimeout: options?.analysisTimeout,
+        readOnly: options?.readOnly,
+        ghidraServer,
       });
 
       state.workerId = workerId;
@@ -309,6 +396,7 @@ export class SessionManager {
         projectPath: state.projectPath,
         programPath: state.programPath,
         autoAnalyze: false,
+        ghidraServer: state.ghidraServer,
       });
 
       state.workerId = workerId;
@@ -342,6 +430,7 @@ export class SessionManager {
         programPath: state.programPath,
         autoAnalyze: options?.autoAnalyze ?? false, // don't re-analyze on respawn
         readOnly: options?.readOnly,
+        ghidraServer: state.ghidraServer,
       });
 
       state.workerId = workerId;
@@ -386,8 +475,11 @@ export class SessionManager {
       existingSession.lastAccessedAt = new Date();
       console.log(`[SessionManager] Reconnected worker for session ${reconnect.sessionId}`);
     } else {
-      // Reconstruct session from worker metadata (daemon was fully restarted)
-      const binaryHash = await this.computeFileHash(reconnect.binaryPath);
+      // Reconstruct session from worker metadata (daemon was fully restarted).
+      // Server (ghidra://) sessions have no local file to hash — hash the URL.
+      const binaryHash = reconnect.binaryPath.startsWith('ghidra://')
+        ? crypto.createHash('sha256').update(reconnect.binaryPath).digest('hex')
+        : await this.computeFileHash(reconnect.binaryPath);
       const state: SessionState = {
         binaryPath: reconnect.binaryPath,
         binaryHash,
@@ -548,6 +640,14 @@ export class SessionManager {
   }
 }
 
+interface GhidraServerInfo {
+  host: string;
+  port: number;
+  repo: string;
+  programPath: string;
+  serverUser: string;
+}
+
 interface SessionState {
   binaryPath: string;
   binaryHash: string;
@@ -562,4 +662,44 @@ interface SessionState {
   error?: string;
   respawnPromise?: Promise<void>;
   lastRespawnAt?: number;
+  ghidraServer?: GhidraServerInfo;
+}
+
+/**
+ * Parse a `ghidra://HOST[:PORT]/REPO/PROGRAM/PATH` URL into its components.
+ * The first path segment is the repository name; the remainder (with a leading
+ * slash) is the program path within that repository. Port defaults to 13100.
+ */
+export function parseGhidraServerUrl(url: string): {
+  host: string;
+  port: number;
+  repo: string;
+  programPath: string;
+} {
+  const rest = url.slice('ghidra://'.length);
+  const slash = rest.indexOf('/');
+  if (slash < 0) {
+    throw new Error(`Invalid ghidra:// URL (missing repo/program): ${url}`);
+  }
+  const authority = rest.slice(0, slash);
+  const pathPart = rest.slice(slash + 1); // "REPO/PROGRAM/PATH"
+
+  const colon = authority.indexOf(':');
+  const host = colon >= 0 ? authority.slice(0, colon) : authority;
+  const port = colon >= 0 ? parseInt(authority.slice(colon + 1), 10) : 13100;
+  if (!host || Number.isNaN(port)) {
+    throw new Error(`Invalid ghidra:// host:port: ${url}`);
+  }
+
+  const repoSlash = pathPart.indexOf('/');
+  if (repoSlash < 0) {
+    throw new Error(`Invalid ghidra:// URL (missing program path): ${url}`);
+  }
+  const repo = pathPart.slice(0, repoSlash);
+  const programPath = pathPart.slice(repoSlash); // includes leading '/'
+  if (!repo) {
+    throw new Error(`Invalid ghidra:// URL (empty repo): ${url}`);
+  }
+
+  return { host, port, repo, programPath };
 }

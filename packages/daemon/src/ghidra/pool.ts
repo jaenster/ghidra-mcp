@@ -55,6 +55,14 @@ interface PendingCommand {
   timeout: NodeJS.Timeout;
 }
 
+interface GhidraServerSpawnOptions {
+  host: string;
+  port: number;
+  repo: string;
+  programPath: string;
+  serverUser: string;
+}
+
 interface SpawnOptions {
   binaryPath: string;
   projectPath: string;
@@ -62,6 +70,7 @@ interface SpawnOptions {
   autoAnalyze?: boolean;
   analysisTimeout?: number;
   readOnly?: boolean;
+  ghidraServer?: GhidraServerSpawnOptions;
 }
 
 const WORKER_STARTUP_TIMEOUT_MS = 60000;
@@ -210,18 +219,34 @@ export class WorkerPool {
       '--worker-id', workerId,
       '--session-id', sessionId,
       '--daemon-url', daemonUrl,
-      '--binary', options.binaryPath,
-      '--project', options.projectPath,
     ];
+
+    if (options.ghidraServer) {
+      // Ghidra Server (shared repository) mode: connect to a remote server and
+      // open a shared program read-only. Mutually exclusive with --binary/--project;
+      // the password is read by the worker from GHIDRA_SERVER_PASSWORD (inherited env).
+      const srv = options.ghidraServer;
+      args.push(
+        '--ghidra-server', `${srv.host}:${srv.port}`,
+        '--repo', srv.repo,
+        '--program', srv.programPath,
+        '--server-user', srv.serverUser,
+      );
+    } else {
+      args.push(
+        '--binary', options.binaryPath,
+        '--project', options.projectPath,
+      );
+      if (options.programPath) {
+        args.push('--program-path', options.programPath);
+      }
+    }
 
     if (options.autoAnalyze) {
       args.push('--analyze');
     }
     if (options.analysisTimeout) {
       args.push('--analysis-timeout', String(options.analysisTimeout));
-    }
-    if (options.programPath) {
-      args.push('--program-path', options.programPath);
     }
     if (options.readOnly) {
       args.push('--read-only');

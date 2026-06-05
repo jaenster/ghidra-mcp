@@ -255,6 +255,117 @@ public class ProjectOps {
         log.info("Project opened read-only successfully");
     }
 
+    // ============== Ghidra Server (remote shared project) ==============
+
+    /**
+     * Connect to a remote Ghidra Server and open a shared program from a repository.
+     *
+     * Authentication uses the standard Ghidra password authenticator.  Because most
+     * Ghidra Servers run in fixed-identity mode (the client may NOT choose its own
+     * login name — nameAllowed=false in the auth callback), the login name is derived
+     * from the JVM's user.name system property.  We therefore force user.name to the
+     * supplied server user id before installing the authenticator so the server sees
+     * the right identity.
+     *
+     * The program is opened read-only by default so the production repository is never
+     * locked or written to.
+     */
+    public void openServerProgram(String host, int port, String repoName, String programPath,
+                                  String user, char[] password, boolean readOnly) throws Exception {
+        Logger log = ctx.getLog();
+        log.info("Connecting to Ghidra Server " + host + ":" + port + " repo=" + repoName +
+                 " program=" + programPath + " user=" + user + " readOnly=" + readOnly);
+
+        ctx.setReadOnly(readOnly);
+
+        // Ghidra Servers commonly reject client-supplied login names (fixed identity mode);
+        // the effective login name comes from user.name.  Align it with the requested user.
+        if (user != null && !user.isEmpty()) {
+            System.setProperty("user.name", user);
+        }
+
+        ghidra.framework.client.ClientUtil.setClientAuthenticator(
+                new ghidra.framework.client.PasswordClientAuthenticator(user, new String(password)));
+
+        ghidra.framework.client.RepositoryServerAdapter server =
+                ghidra.framework.client.ClientUtil.getRepositoryServer(host, port, true);
+        server.connect();
+        if (!server.isConnected()) {
+            throw new IOException("Failed to connect to Ghidra Server " + host + ":" + port);
+        }
+
+        ghidra.framework.client.RepositoryAdapter repo = server.getRepository(repoName);
+        repo.connect();
+        if (!repo.isConnected()) {
+            throw new IOException("Failed to connect to repository: " + repoName);
+        }
+        log.info("Connected to repository '" + repoName + "', itemCount=" + repo.getItemCount());
+
+        // Build the program URL and open the shared DomainFile via the ghidra:// protocol.
+        java.net.URL programUrl =
+                ghidra.framework.protocol.ghidra.GhidraURL.makeURL(host, port, repoName, programPath);
+        log.info("Opening shared program URL: " + programUrl);
+
+        final boolean ro = readOnly;
+        final java.util.concurrent.atomic.AtomicReference<Program> progRef =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        final java.util.concurrent.atomic.AtomicReference<DomainFile> fileRef =
+                new java.util.concurrent.atomic.AtomicReference<>();
+
+        ghidra.framework.protocol.ghidra.GhidraURLResultHandler handler =
+                new ghidra.framework.protocol.ghidra.GhidraURLResultHandler() {
+            @Override
+            public void processResult(DomainFile df, java.net.URL url, ghidra.util.task.TaskMonitor m)
+                    throws IOException {
+                fileRef.set(df);
+                try {
+                    Program p;
+                    if (ro) {
+                        p = (Program) df.getReadOnlyDomainObject(ctx, DomainFile.DEFAULT_VERSION, m);
+                    } else {
+                        // okToUpgrade=false: server and programs are the same Ghidra version.
+                        p = (Program) df.getDomainObject(ctx, false, false, m);
+                    }
+                    progRef.set(p);
+                } catch (Exception e) {
+                    throw new IOException("Failed to open domain object: " + e.getMessage(), e);
+                }
+            }
+            @Override
+            public void processResult(DomainFolder folder, java.net.URL url, ghidra.util.task.TaskMonitor m) {
+                // Not expected when querying a program URL.
+            }
+            @Override
+            public void handleError(String title, String message, java.net.URL url, IOException cause)
+                    throws IOException {
+                if (cause != null) throw cause;
+                throw new IOException(title + ": " + message);
+            }
+        };
+
+        ghidra.framework.protocol.ghidra.GhidraURLQuery.queryUrl(
+                programUrl, Program.class, handler,
+                ghidra.framework.protocol.ghidra.GhidraURLQuery.LinkFileControl.FOLLOW_EXTERNAL,
+                ctx.getMonitor());
+
+        Program program = progRef.get();
+        if (program == null) {
+            throw new IOException("Program not found or could not be opened: " + programPath +
+                                  " in repository " + repoName);
+        }
+
+        DomainFile df = fileRef.get();
+        String path = df != null ? df.getPathname() : programPath;
+
+        ctx.setProgram(program);
+        ctx.setFlatApi(new FlatProgramAPI(program));
+        initializeDecompiler();
+        ctx.registerProgram(path, program, ctx.getFlatApi(), ctx.getDecompiler());
+
+        log.info("Shared program opened successfully: " + program.getName() +
+                 " (" + program.getFunctionManager().getFunctionCount() + " functions)");
+    }
+
     // ============== Save / Close ==============
 
     /**
