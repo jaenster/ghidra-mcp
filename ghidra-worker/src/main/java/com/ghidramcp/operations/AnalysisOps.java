@@ -18,9 +18,6 @@ import ghidra.program.model.symbol.*;
 import ghidra.util.task.TaskMonitor;
 import ghidra.app.cmd.function.CreateFunctionCmd;
 
-import ghidra.jython.GhidraJythonInterpreter;
-import ghidra.jython.JythonScript;
-import ghidra.jython.JythonUtils;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
@@ -1358,7 +1355,7 @@ public class AnalysisOps {
 
             // Create JumpTable override
             ArrayList<Address> destList = new ArrayList<>(caseAddrs);
-            JumpTable jt = new JumpTable(branchAddr, destList, true);
+            JumpTable jt = new JumpTable(branchAddr, destList, true, 0);
             jt.writeOverride(func);
 
             // Rebuild function body to pick up the new cases
@@ -1551,154 +1548,20 @@ public class AnalysisOps {
     }
 
     // =====================================================================
-    //  PYTHON SCRIPT EXECUTION (Jython)
+    //  PYTHON SCRIPT EXECUTION (Jython removed in 12.1 — stubbed)
     // =====================================================================
 
-    private synchronized void initializeJython() throws Exception {
-        if (GhidraContext.isJythonInitialized()) return;
-        try {
-            JythonUtils.setupJythonHomeDir();
-            JythonUtils.setupJythonCacheDir(ctx.getMonitor());
-        } catch (Exception e) {
-            // Fallback: set properties from GHIDRA_HOME
-            String ghidraHome = System.getenv("GHIDRA_HOME");
-            if (ghidraHome == null) {
-                throw new Exception("GHIDRA_HOME not set and Jython init failed: " + e.getMessage());
-            }
-            // Find the jython data directory
-            File jythonDir = new File(ghidraHome, "Ghidra/Features/Jython/data/jython-2.7.4");
-            if (!jythonDir.exists()) {
-                // Try without version
-                File[] candidates = new File(ghidraHome, "Ghidra/Features/Jython/data").listFiles(
-                    f -> f.isDirectory() && f.getName().startsWith("jython-"));
-                if (candidates != null && candidates.length > 0) {
-                    jythonDir = candidates[0];
-                }
-            }
-            if (jythonDir.exists()) {
-                System.setProperty("jython.home", jythonDir.getAbsolutePath());
-            }
-            File cacheDir = new File(System.getProperty("java.io.tmpdir"), "ghidra-mcp-jython-cache");
-            cacheDir.mkdirs();
-            System.setProperty("python.cachedir", cacheDir.getAbsolutePath());
-        }
-        GhidraContext.setJythonInitialized(true);
-    }
-
-    /**
-     * Execute a Python (Jython 2.7) script using Ghidra's GhidraJythonInterpreter.
-     *
-     * Scripts have access to:
-     * - currentProgram, currentAddress, monitor (Ghidra globals)
-     * - All FlatProgramAPI methods as bare functions (toAddr, getFunction, println, etc.)
-     * - All GhidraScript methods
-     *
-     * @param code Inline Python code to execute (null if using filePath)
-     * @param filePath Path to a .py script file (null if using inline code)
-     * @param timeout Execution timeout in seconds
-     * @param sandbox Whether to run in sandboxed mode (currently unused for Python)
-     */
     public GhidraEngine.ScriptResult executePythonScript(String code, String filePath, int timeout, boolean sandbox)
             throws Exception {
-        Program program = ctx.getProgram();
-        TaskMonitor monitor = ctx.getMonitor();
-
+        // Jython (ghidra.jython.*) was removed in Ghidra 12.1 in favor of PyGhidra
+        // (CPython via Jep). Python execution is not wired up on this build; use the
+        // Java GhidraScript path (executeScript) instead.
         GhidraEngine.ScriptResult result = new GhidraEngine.ScriptResult();
+        result.success = false;
         result.output = "";
-
-        initializeJython();
-
-        GhidraJythonInterpreter interpreter = GhidraJythonInterpreter.get();
-        if (interpreter == null) {
-            result.success = false;
-            result.error = "Failed to create Jython interpreter";
-            return result;
-        }
-
-        try {
-            // Capture output
-            StringWriter stdoutWriter = new StringWriter();
-            StringWriter stderrWriter = new StringWriter();
-            PrintWriter stdout = new PrintWriter(stdoutWriter, true);
-            PrintWriter stderr = new PrintWriter(stderrWriter, true);
-            interpreter.setOut(stdoutWriter);
-            interpreter.setErr(stderrWriter);
-
-            // Create GhidraState — binds currentProgram, currentAddress etc.
-            ghidra.framework.model.Project proj = (ctx.getProject() != null) ? ctx.getProject().getProject() : null;
-            GhidraState ghidraState = new GhidraState(null, proj, program,
-                null, null, null);
-
-            // Create JythonScript and configure it with state/monitor/writer
-            JythonScript scriptObj = new JythonScript();
-            scriptObj.set(ghidraState, monitor, stdout);
-
-            // Inject GhidraScript/FlatProgramAPI methods as bare Python functions
-            // injectScriptHierarchy is package-private, so we use reflection
-            java.lang.reflect.Method injectMethod = GhidraJythonInterpreter.class
-                .getDeclaredMethod("injectScriptHierarchy", JythonScript.class);
-            injectMethod.setAccessible(true);
-            injectMethod.invoke(interpreter, scriptObj);
-
-            // Also set common globals directly for belt-and-suspenders access
-            interpreter.set("currentProgram", program);
-            interpreter.set("currentAddress", program.getImageBase());
-            interpreter.set("monitor", monitor);
-
-            // Execute with timeout
-            final GhidraJythonInterpreter finalInterpreter = interpreter;
-            Thread execThread = new Thread(() -> {
-                try {
-                    if (filePath != null) {
-                        finalInterpreter.execFile(
-                            new generic.jar.ResourceFile(new java.io.File(filePath)),
-                            scriptObj);
-                    } else {
-                        finalInterpreter.exec(code);
-                    }
-                } catch (Throwable t) {
-                    stderrWriter.write("Error: " + t.getClass().getName() + ": " + t.getMessage() + "\n");
-                    java.io.StringWriter sw = new java.io.StringWriter();
-                    t.printStackTrace(new java.io.PrintWriter(sw));
-                    stderrWriter.write(sw.toString());
-                }
-            }, "jython-exec");
-
-            execThread.start();
-            execThread.join(timeout * 1000L);
-
-            if (execThread.isAlive()) {
-                // interrupt() is package-private, use reflection for graceful Jython interrupt
-                try {
-                    java.lang.reflect.Method interruptMethod = GhidraJythonInterpreter.class
-                        .getDeclaredMethod("interrupt", Thread.class);
-                    interruptMethod.setAccessible(true);
-                    interruptMethod.invoke(interpreter, execThread);
-                } catch (Exception e) {
-                    // Fallback to Thread.interrupt()
-                    execThread.interrupt();
-                }
-                execThread.join(5000);
-                result.success = false;
-                result.error = "Script timed out after " + timeout + "s";
-            } else {
-                result.success = stderrWriter.toString().isEmpty();
-            }
-
-            stdout.flush();
-            stderr.flush();
-            result.output = stdoutWriter.toString();
-            String errOutput = stderrWriter.toString();
-            if (!errOutput.isEmpty()) {
-                result.error = errOutput;
-            }
-
-        } finally {
-            // Clean up any orphaned transactions left by the script
-            ctx.cleanupOrphanedTransactions("script execution");
-            interpreter.cleanup();
-        }
-
+        result.error = "Python script execution is not supported on this build "
+            + "(Jython was removed in Ghidra 12.1; PyGhidra port pending). "
+            + "Use a Java GhidraScript via execute_script instead.";
         return result;
     }
 

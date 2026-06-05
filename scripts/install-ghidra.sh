@@ -7,8 +7,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
-GHIDRA_VERSION="12.0.2"
-GHIDRA_DATE="20260129"
+GHIDRA_VERSION="12.1"
+GHIDRA_DATE="20260513"
 GHIDRA_ZIP="ghidra_${GHIDRA_VERSION}_PUBLIC_${GHIDRA_DATE}.zip"
 GHIDRA_URL="https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_${GHIDRA_VERSION}_build/${GHIDRA_ZIP}"
 GHIDRA_DIR="$PROJECT_ROOT/ghidra_${GHIDRA_VERSION}_PUBLIC"
