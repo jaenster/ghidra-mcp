@@ -1,0 +1,15 @@
+.git
+**/node_modules
+**/dist
+# Stale incremental build state must not leak in — composite tsc would otherwise
+# skip .d.ts emit and break cross-package type resolution.
+**/*.tsbuildinfo
+ghidra-worker/build
+ghidra-worker/.gradle
+ghidra_*_PUBLIC
+*.log
+.DS_Store
+test-fixtures/binaries
+test-fixtures/ghidra-projects
+*.db
+*.sqlite

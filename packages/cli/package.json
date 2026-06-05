@@ -21,9 +21,9 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
-    "@ghidra-mcp/shared": "*",
-    "@ghidra-mcp/daemon": "*",
-    "@ghidra-mcp/mcp": "*",
+    "@ghidra-mcp/shared": "workspace:*",
+    "@ghidra-mcp/daemon": "workspace:*",
+    "@ghidra-mcp/mcp": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.0.0",
     "commander": "^11.1.0"
   },

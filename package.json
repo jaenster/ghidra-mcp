@@ -4,25 +4,27 @@
   "description": "Headless Ghidra MCP server with SSE/HTTP transport",
   "private": true,
   "type": "module",
+  "packageManager": "pnpm@11.0.9",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  },
   "bin": {
     "ghidra": "./packages/cli/dist/bin.js"
   },
-  "workspaces": [
-    "packages/*"
-  ],
   "scripts": {
-    "build": "npm run build -w @ghidra-mcp/shared && npm run build -w @ghidra-mcp/mcp && npm run build -w @ghidra-mcp/daemon && npm run build -w @ghidra-mcp/cli && npm run build:dashboard",
-    "build:dashboard": "npm run build -w @ghidra-mcp/dashboard || true",
-    "clean": "npm run clean --workspaces --if-present && rm -rf node_modules",
-    "test": "npm run test:unit && npm run test:e2e",
-    "test:unit": "npm run test --workspaces --if-present",
+    "build": "pnpm -r build",
+    "clean": "pnpm -r --if-present clean && rm -rf node_modules",
+    "test": "pnpm run test:unit && pnpm run test:e2e",
+    "test:unit": "pnpm -r --if-present test",
     "test:e2e": "node --test --test-timeout=120000 --import tsx 'test/e2e/**/*.test.ts'",
     "test:e2e:debug": "DEBUG=1 node --test --test-timeout=120000 --import tsx 'test/e2e/**/*.test.ts'",
     "lint": "eslint packages/*/src/**/*.ts",
     "typecheck": "tsc -p packages/shared/tsconfig.json --noEmit && tsc -p packages/mcp/tsconfig.json --noEmit && tsc -p packages/daemon/tsconfig.json --noEmit && tsc -p packages/cli/tsconfig.json --noEmit",
     "typecheck:all": "tsc --build",
-    "start": "npm run start -w @ghidra-mcp/cli",
-    "dev": "npm run dev -w @ghidra-mcp/daemon",
+    "start": "pnpm --filter @ghidra-mcp/cli start",
+    "dev": "pnpm --filter @ghidra-mcp/daemon dev",
     "fixtures:build": "cd test-fixtures && make native",
     "fixtures:cross": "cd test-fixtures && make cross",
     "fixtures:ghidra": "cd test-fixtures && make ghidra-setup",

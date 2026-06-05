@@ -18,7 +18,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@ghidra-mcp/shared": "*",
+    "@ghidra-mcp/shared": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.0.0",
     "@toon-format/toon": "^2.1.0",
     "zod": "^3.22.4"

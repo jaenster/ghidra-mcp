@@ -13,6 +13,8 @@ ghidra-worker/build/
 ghidra-worker/.gradle/
 *.class
 *.jar
+# …but the Gradle wrapper jar must be committed (CI/Docker build needs it).
+!ghidra-worker/gradle/wrapper/gradle-wrapper.jar
 
 # Test artifacts
 test-fixtures/binaries/
