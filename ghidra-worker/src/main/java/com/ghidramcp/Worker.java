@@ -399,6 +399,11 @@ public class Worker {
             }
             // Server programs are opened read-only for now (no check-out/write support yet).
             readOnly = true;
+            // The Ghidra Server runs with nameAllowed=false, so the login identity is taken
+            // from the JVM user.name. This MUST be set before Ghidra initializes (Application
+            // init caches the username), otherwise we'd authenticate as the container's OS
+            // user (e.g. 'root') and the server rejects it as an unknown user.
+            System.setProperty("user.name", serverUser);
         } else if (!baseOk || binaryPath == null || projectPath == null) {
             System.err.println("Usage: Worker --worker-id <id> --session-id <id> --daemon-url <url> " +
                              "--binary <path> --project <path> [--analyze] [--analysis-timeout <ms>]");
