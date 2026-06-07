@@ -537,6 +537,8 @@ public class GhidraEngine {
         public String maxAddress;
         public String endianness;
         public int pointerSize;
+        public Integer version;
+        public Integer latestVersion;
     }
 
     public static class FunctionInfo {

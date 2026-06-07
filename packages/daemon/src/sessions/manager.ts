@@ -6,6 +6,10 @@ import * as path from 'node:path';
 import * as fs from 'node:fs';
 import * as crypto from 'node:crypto';
 import type { Session, SessionStatus } from '@ghidra-mcp/shared';
+
+function shortId(): string {
+  return crypto.randomBytes(4).toString('hex'); // 8 hex chars, 4B entropy
+}
 import type { WorkerCommand, WorkerResponse, WorkerReconnectRequest } from '@ghidra-mcp/shared/protocol';
 import { getProjectsDir } from '@ghidra-mcp/shared/platform';
 import type { StateDatabase } from '../state/database.js';
@@ -120,7 +124,7 @@ export class SessionManager {
     }
 
     // Create new session
-    const sessionId = crypto.randomUUID();
+    const sessionId = shortId();
     const projectPath = existingWorkerId
       ? resolvedPath  // reusing worker, use the .gpr path as project path
       : path.join(getProjectsDir(), sessionId);
@@ -244,7 +248,7 @@ export class SessionManager {
       }
     }
 
-    const sessionId = crypto.randomUUID();
+    const sessionId = shortId();
     // Server sessions still need a local project dir for the worker's transient project.
     const projectPath = path.join(getProjectsDir(), sessionId);
 

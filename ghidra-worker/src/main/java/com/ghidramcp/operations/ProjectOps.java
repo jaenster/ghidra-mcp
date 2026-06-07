@@ -633,6 +633,12 @@ public class ProjectOps {
         info.endianness = program.getLanguage().isBigEndian() ? "big" : "little";
         info.pointerSize = program.getDefaultPointerSize();
 
+        DomainFile serverFile = ctx.getServerFile();
+        if (serverFile != null) {
+            info.version = serverFile.getVersion();
+            info.latestVersion = serverFile.getLatestVersion();
+        }
+
         return info;
     }
 
