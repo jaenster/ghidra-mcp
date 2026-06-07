@@ -601,7 +601,7 @@ export function installOAuth(app: Express, db: StateDatabase, config: OAuthConfi
       next();
       return;
     }
-    if (req.path.startsWith('/api/') || req.xhr || req.headers.accept?.includes('application/json')) {
+    if (req.originalUrl.startsWith('/api/') || req.xhr || req.headers.accept?.includes('application/json')) {
       res.status(401).json({ error: 'unauthorized' });
       return;
     }
