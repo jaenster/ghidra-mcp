@@ -1,26 +1,32 @@
 /**
- * Self-contained OAuth 2.1 authorization server for the ghidra-mcp connector.
+ * OAuth 2.1 authorization server for the ghidra-mcp connector, federated to an
+ * upstream OIDC provider (Authentik) for the actual human login.
  *
- * The daemon acts as both authorization server and resource server: it serves
+ * The daemon is the MCP-facing authorization + resource server: it serves
  * discovery metadata, supports Dynamic Client Registration (RFC 7591) and the
  * authorization-code + PKCE flow, and issues/validates its own opaque tokens.
- * A single shared login secret (GHIDRA_MCP_AUTH_SECRET) gates the consent step,
- * which is appropriate for a personal/single-user deployment.
+ * It does NOT authenticate users itself — /authorize redirects the browser to
+ * the upstream OIDC provider, and a callback validates the returned ID token,
+ * enforces a username allowlist, then resumes the MCP flow by minting a code.
  *
- * Auth only activates when both GHIDRA_MCP_PUBLIC_URL and GHIDRA_MCP_AUTH_SECRET
- * are set; otherwise the daemon stays open for local development.
+ * Auth only activates when GHIDRA_MCP_PUBLIC_URL, GHIDRA_MCP_AUTH_SECRET and the
+ * GHIDRA_MCP_OIDC_* settings are all present; otherwise the daemon stays open
+ * for local development.
  *
  * Security notes:
  * - Tokens and authorization codes are persisted only as SHA-256 hashes, so a
  *   leak of the state DB does not expose usable credentials.
- * - The consent POST is bound to a legitimate /authorize render via an HMAC over
- *   the authorization parameters, and the redirect_uri is re-validated against
- *   the registered client before any code is issued.
+ * - The upstream `state` is a stateless HMAC-signed envelope carrying the
+ *   pending MCP authorization params; the callback verifies it (signature +
+ *   freshness) and re-validates the redirect_uri against the registered client
+ *   before any code is issued.
+ * - The ID token is received directly from the provider's token endpoint over
+ *   TLS (OIDC Core §3.1.3.7), so iss/aud/exp are checked from the payload
+ *   without a separate JWKS signature verification step.
  */
 
 import { randomBytes, createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import type { Express, Request, Response, RequestHandler } from 'express';
-import express from 'express';
 import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from '@modelcontextprotocol/sdk/server/auth/router.js';
 import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
 import { InvalidTokenError, InvalidGrantError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
@@ -30,13 +36,24 @@ import type { OAuthClientInformationFull, OAuthTokens, OAuthTokenRevocationReque
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
 import type { StateDatabase } from '../state/database.js';
 
+export interface OidcConfig {
+  /** Issuer URL, exactly as it appears in the id_token `iss` claim. */
+  issuer: string;
+  clientId: string;
+  clientSecret: string;
+  /** Allowed logins, matched against preferred_username or email (case-insensitive). */
+  allowedUsers: string[];
+}
+
 export interface OAuthConfig {
   enabled: boolean;
   publicUrl: string;
+  /** Internal HMAC signing key (no longer a user-facing password). */
   secret: string;
   scopesSupported: string[];
   accessTtlSec: number;
   refreshTtlSec: number;
+  oidc: OidcConfig;
 }
 
 function positiveInt(value: string | undefined, fallback: number): number {
@@ -48,18 +65,30 @@ export function getOAuthConfig(): OAuthConfig {
   const publicUrl = process.env.GHIDRA_MCP_PUBLIC_URL?.trim().replace(/\/+$/, '') ?? '';
   const secret = process.env.GHIDRA_MCP_AUTH_SECRET ?? '';
   const scopes = process.env.GHIDRA_MCP_OAUTH_SCOPES?.trim();
+
+  const oidc: OidcConfig = {
+    issuer: process.env.GHIDRA_MCP_OIDC_ISSUER?.trim().replace(/\/+$/, '') ?? '',
+    clientId: process.env.GHIDRA_MCP_OIDC_CLIENT_ID?.trim() ?? '',
+    clientSecret: process.env.GHIDRA_MCP_OIDC_CLIENT_SECRET ?? '',
+    allowedUsers: (process.env.GHIDRA_MCP_OIDC_ALLOWED_USERS ?? '')
+      .split(/[\s,]+/).map((s) => s.trim().toLowerCase()).filter(Boolean),
+  };
+  const oidcReady = Boolean(oidc.issuer && oidc.clientId && oidc.clientSecret);
+
   return {
-    enabled: Boolean(publicUrl && secret),
+    enabled: Boolean(publicUrl && secret && oidcReady),
     publicUrl,
     secret,
     scopesSupported: scopes ? scopes.split(/[\s,]+/).filter(Boolean) : ['ghidra'],
     accessTtlSec: positiveInt(process.env.GHIDRA_MCP_ACCESS_TTL, 3600),
     refreshTtlSec: positiveInt(process.env.GHIDRA_MCP_REFRESH_TTL, 30 * 24 * 3600),
+    oidc,
   };
 }
 
 const CODE_TTL_MS = 5 * 60 * 1000;
-const CONSENT_PATH = '/oauth/consent';
+const STATE_TTL_MS = 10 * 60 * 1000;
+const CALLBACK_PATH = '/oauth/authentik/callback';
 
 function newSecret(): string {
   return randomBytes(32).toString('hex');
@@ -81,6 +110,33 @@ function intersectScopes(requested: string, granted: string): string {
   return kept.join(' ');
 }
 
+function b64urlDecode(s: string): Buffer {
+  return Buffer.from(s.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+}
+
+/** Decode (not verify) a JWT payload — signature is trusted via the direct TLS exchange. */
+function decodeJwtPayload(jwt: string): Record<string, unknown> {
+  const parts = jwt.split('.');
+  if (parts.length < 2) throw new Error('malformed id_token');
+  return JSON.parse(b64urlDecode(parts[1]).toString('utf8')) as Record<string, unknown>;
+}
+
+/** The pending MCP authorization request, round-tripped through the upstream `state`. */
+interface PendingAuth {
+  cid: string; // client_id
+  ruri: string; // redirect_uri
+  cc: string; // code_challenge
+  st: string; // MCP client state
+  sc: string; // requested scopes
+  rs: string; // resource indicator
+  iat: number; // issued-at (ms)
+}
+
+interface OidcEndpoints {
+  authorization_endpoint: string;
+  token_endpoint: string;
+}
+
 /** Clients store backed by the persistent StateDatabase (survives restarts). */
 class DbClientsStore implements OAuthRegisteredClientsStore {
   constructor(private db: StateDatabase) {}
@@ -98,34 +154,127 @@ class DbClientsStore implements OAuthRegisteredClientsStore {
 
 export class GhidraOAuthProvider implements OAuthServerProvider {
   readonly clientsStore: DbClientsStore;
-  /** Key for binding the consent POST to a legitimate /authorize render. */
-  private readonly consentKey: Buffer;
+  /** Key for signing the stateless upstream `state` envelope. */
+  private readonly stateKey: Buffer;
+  private discoveryCache?: Promise<OidcEndpoints>;
 
   constructor(private db: StateDatabase, private config: OAuthConfig) {
     this.clientsStore = new DbClientsStore(db);
-    this.consentKey = createHash('sha256').update(`${config.secret}|consent-binding`).digest();
+    this.stateKey = createHash('sha256').update(`${config.secret}|oidc-state`).digest();
   }
 
-  /** HMAC over the authorization params so consent cannot be forged/tampered. */
-  signParams(p: { clientId: string; redirectUri: string; codeChallenge: string; state: string; scope: string; resource: string }): string {
-    return createHmac('sha256', this.consentKey)
-      .update([p.clientId, p.redirectUri, p.codeChallenge, p.state, p.scope, p.resource].join('\n'))
-      .digest('hex');
+  private callbackUrl(): string {
+    return `${this.config.publicUrl}${CALLBACK_PATH}`;
   }
 
+  /** Lazily fetch + cache the upstream OIDC discovery document. */
+  private discovery(): Promise<OidcEndpoints> {
+    if (!this.discoveryCache) {
+      const url = `${this.config.oidc.issuer}/.well-known/openid-configuration`;
+      this.discoveryCache = fetch(url).then(async (r) => {
+        if (!r.ok) throw new Error(`OIDC discovery failed: ${r.status}`);
+        const doc = (await r.json()) as OidcEndpoints;
+        if (!doc.authorization_endpoint || !doc.token_endpoint) {
+          throw new Error('OIDC discovery missing endpoints');
+        }
+        return doc;
+      }).catch((e) => {
+        this.discoveryCache = undefined; // allow retry on next request
+        throw e;
+      });
+    }
+    return this.discoveryCache;
+  }
+
+  /** Sign the pending-auth envelope into an opaque, tamper-proof `state` string. */
+  private signState(p: Omit<PendingAuth, 'iat'>): string {
+    const payload: PendingAuth = { ...p, iat: Date.now() };
+    const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
+    const sig = createHmac('sha256', this.stateKey).update(body).digest('base64url');
+    return `${body}.${sig}`;
+  }
+
+  /** Verify a returned `state`, returning the pending auth or null if invalid/expired. */
+  verifyState(state: string): PendingAuth | null {
+    const dot = state.lastIndexOf('.');
+    if (dot < 0) return null;
+    const body = state.slice(0, dot);
+    const sig = state.slice(dot + 1);
+    const expected = createHmac('sha256', this.stateKey).update(body).digest('base64url');
+    if (sig.length !== expected.length || !timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) {
+      return null;
+    }
+    try {
+      const p = JSON.parse(b64urlDecode(body).toString('utf8')) as PendingAuth;
+      if (!p.iat || Date.now() - p.iat > STATE_TTL_MS) return null;
+      return p;
+    } catch {
+      return null;
+    }
+  }
+
+  isAllowed(username?: unknown, email?: unknown): boolean {
+    const allow = this.config.oidc.allowedUsers;
+    if (allow.length === 0) return true; // empty allowlist = any authenticated user
+    const u = typeof username === 'string' ? username.toLowerCase() : '';
+    const e = typeof email === 'string' ? email.toLowerCase() : '';
+    return (u && allow.includes(u)) || (e && allow.includes(e)) || false;
+  }
+
+  /**
+   * MCP /authorize entrypoint: instead of authenticating locally, redirect the
+   * browser to the upstream OIDC provider with a signed state carrying the
+   * pending MCP request so the callback can resume it.
+   */
   async authorize(client: OAuthClientInformationFull, params: AuthorizationParams, res: Response): Promise<void> {
-    const view = {
-      clientId: client.client_id,
-      clientName: client.client_name ?? client.client_id,
-      redirectUri: params.redirectUri,
-      codeChallenge: params.codeChallenge,
-      state: params.state ?? '',
-      scope: (params.scopes ?? []).join(' '),
-      resource: params.resource?.href ?? '',
-    };
-    const sig = this.signParams(view);
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.send(renderConsentPage({ ...view, sig }));
+    const ep = await this.discovery();
+    const state = this.signState({
+      cid: client.client_id,
+      ruri: params.redirectUri,
+      cc: params.codeChallenge,
+      st: params.state ?? '',
+      sc: (params.scopes ?? []).join(' '),
+      rs: params.resource?.href ?? '',
+    });
+    const u = new URL(ep.authorization_endpoint);
+    u.searchParams.set('response_type', 'code');
+    u.searchParams.set('client_id', this.config.oidc.clientId);
+    u.searchParams.set('redirect_uri', this.callbackUrl());
+    u.searchParams.set('scope', 'openid profile email');
+    u.searchParams.set('state', state);
+    res.redirect(302, u.href);
+  }
+
+  /**
+   * Exchange the upstream authorization code for an ID token, validate it, and
+   * return its claims. Confidential-client (client_secret) + direct TLS to the
+   * token endpoint is the trust anchor; iss/aud/exp are checked from the payload.
+   */
+  async exchangeUpstreamCode(code: string): Promise<Record<string, unknown>> {
+    const ep = await this.discovery();
+    const body = new URLSearchParams({
+      grant_type: 'authorization_code',
+      code,
+      redirect_uri: this.callbackUrl(),
+      client_id: this.config.oidc.clientId,
+      client_secret: this.config.oidc.clientSecret,
+    });
+    const r = await fetch(ep.token_endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body,
+    });
+    if (!r.ok) throw new Error(`upstream token exchange failed: ${r.status} ${await r.text()}`);
+    const tok = (await r.json()) as { id_token?: string };
+    if (!tok.id_token) throw new Error('upstream response had no id_token');
+
+    const claims = decodeJwtPayload(tok.id_token);
+    const iss = String(claims.iss ?? '').replace(/\/+$/, '');
+    if (iss !== this.config.oidc.issuer) throw new Error('id_token iss mismatch');
+    const aud = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
+    if (!aud.includes(this.config.oidc.clientId)) throw new Error('id_token aud mismatch');
+    if (typeof claims.exp === 'number' && Date.now() / 1000 > claims.exp) throw new Error('id_token expired');
+    return claims;
   }
 
   async challengeForAuthorizationCode(_client: OAuthClientInformationFull, authorizationCode: string): Promise<string> {
@@ -195,7 +344,7 @@ export class GhidraOAuthProvider implements OAuthServerProvider {
     this.db.deleteOAuthToken(hash(request.token));
   }
 
-  /** Called by the consent route after the shared secret is verified. */
+  /** Called by the upstream callback after the ID token is validated + allowlisted. */
   issueAuthorizationCode(input: {
     clientId: string;
     redirectUri: string;
@@ -251,8 +400,8 @@ export class GhidraOAuthProvider implements OAuthServerProvider {
 
 /**
  * Wire the OAuth authorization server into the Express app: discovery metadata,
- * /authorize, /token, /register, /revoke, the consent route, and returns the
- * bearer-auth middleware to gate the MCP endpoints.
+ * /authorize, /token, /register, /revoke, the upstream OIDC callback, and returns
+ * the bearer-auth middleware to gate the MCP endpoints.
  */
 export function installOAuth(app: Express, db: StateDatabase, config: OAuthConfig): {
   requireAuth: RequestHandler;
@@ -261,52 +410,56 @@ export function installOAuth(app: Express, db: StateDatabase, config: OAuthConfi
   const issuerUrl = new URL(config.publicUrl);
   const provider = new GhidraOAuthProvider(db, config);
 
-  // Consent form submission — verify the shared secret + param binding, re-check
-  // the redirect_uri against the registered client, then mint the code.
-  app.post(CONSENT_PATH, express.urlencoded({ extended: false }), (req: Request, res: Response) => {
-    const { password, client_id, redirect_uri, code_challenge, state, scope, resource, sig } =
-      req.body as Record<string, string>;
-
-    if (!client_id || !redirect_uri || !code_challenge || !sig) {
-      res.status(400).send('Invalid consent request');
+  // Upstream OIDC callback — validate the ID token, enforce the allowlist, then
+  // resume the MCP flow by minting our own authorization code.
+  app.get(CALLBACK_PATH, async (req: Request, res: Response) => {
+    const { code, state, error, error_description } = req.query as Record<string, string>;
+    if (error) {
+      res.status(400).setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.send(renderError('Login failed', `${error}${error_description ? `: ${error_description}` : ''}`));
       return;
     }
 
-    // 1. Parameters must be unchanged since /authorize rendered them.
-    const expectedSig = provider.signParams({
-      clientId: client_id, redirectUri: redirect_uri, codeChallenge: code_challenge,
-      state: state ?? '', scope: scope ?? '', resource: resource ?? '',
+    const pending = state ? provider.verifyState(state) : null;
+    if (!pending || !code) {
+      res.status(400).setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.send(renderError('Invalid login', 'The login request was missing, tampered with, or expired. Please try again.'));
+      return;
+    }
+
+    let claims: Record<string, unknown>;
+    try {
+      claims = await provider.exchangeUpstreamCode(code);
+    } catch {
+      res.status(502).setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.send(renderError('Login failed', 'Could not verify your identity with the upstream provider.'));
+      return;
+    }
+
+    if (!provider.isAllowed(claims.preferred_username, claims.email)) {
+      res.status(403).setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.send(renderError('Access denied', 'Your account is not authorized to use this ghidra-mcp server.'));
+      return;
+    }
+
+    // Defense in depth: redirect_uri must still belong to the registered client.
+    const client = provider.clientsStore.getClient(pending.cid);
+    if (!client || !(client.redirect_uris ?? []).includes(pending.ruri)) {
+      res.status(400).setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.send(renderError('Invalid client', 'Unknown client or unregistered redirect_uri.'));
+      return;
+    }
+
+    const authCode = provider.issueAuthorizationCode({
+      clientId: pending.cid,
+      redirectUri: pending.ruri,
+      codeChallenge: pending.cc,
+      scopes: pending.sc,
+      resource: pending.rs,
     });
-    if (!safeEqual(sig, expectedSig)) {
-      res.status(400).send('Invalid or tampered authorization request');
-      return;
-    }
-
-    // 2. redirect_uri must belong to the registered client (defense in depth).
-    const client = provider.clientsStore.getClient(client_id);
-    if (!client || !(client.redirect_uris ?? []).includes(redirect_uri)) {
-      res.status(400).send('Unknown client or unregistered redirect_uri');
-      return;
-    }
-
-    // 3. Human gate: the shared connector password.
-    if (!password || !safeEqual(password, config.secret)) {
-      res.status(401).setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.send(renderConsentPage({
-        clientId: client_id, clientName: client.client_name ?? client_id, redirectUri: redirect_uri,
-        codeChallenge: code_challenge, state: state ?? '', scope: scope ?? '', resource: resource ?? '',
-        sig, error: 'Incorrect password',
-      }));
-      return;
-    }
-
-    const code = provider.issueAuthorizationCode({
-      clientId: client_id, redirectUri: redirect_uri, codeChallenge: code_challenge,
-      scopes: scope ?? '', resource: resource ?? '',
-    });
-    const redirect = new URL(redirect_uri);
-    redirect.searchParams.set('code', code);
-    if (state) redirect.searchParams.set('state', state);
+    const redirect = new URL(pending.ruri);
+    redirect.searchParams.set('code', authCode);
+    if (pending.st) redirect.searchParams.set('state', pending.st);
     res.redirect(302, redirect.href);
   });
 
@@ -330,51 +483,19 @@ export function installOAuth(app: Express, db: StateDatabase, config: OAuthConfi
   return { requireAuth, provider };
 }
 
-interface ConsentView {
-  clientId: string;
-  clientName: string;
-  redirectUri: string;
-  codeChallenge: string;
-  state: string;
-  scope: string;
-  resource: string;
-  sig: string;
-  error?: string;
-}
-
 function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
 }
 
-function renderConsentPage(v: ConsentView): string {
-  const hidden = (name: string, value: string) =>
-    `<input type="hidden" name="${name}" value="${escapeHtml(value)}">`;
+function renderError(title: string, detail: string): string {
   return `<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ghidra-mcp — authorize</title>
+<title>ghidra-mcp — ${escapeHtml(title)}</title>
 <style>
   body { font: 15px/1.5 system-ui, sans-serif; background: #0d1117; color: #e6edf3; display: grid; place-items: center; min-height: 100vh; margin: 0; }
   .card { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 28px 32px; width: min(380px, 90vw); }
-  h1 { font-size: 18px; margin: 0 0 4px; }
-  p { color: #8b949e; margin: 0 0 18px; }
-  .client { color: #58a6ff; }
-  input[type=password] { width: 100%; box-sizing: border-box; padding: 10px 12px; border-radius: 8px; border: 1px solid #30363d; background: #0d1117; color: #e6edf3; font-size: 15px; }
-  button { width: 100%; margin-top: 14px; padding: 10px; border: 0; border-radius: 8px; background: #238636; color: #fff; font-size: 15px; cursor: pointer; }
-  button:hover { background: #2ea043; }
-  .err { color: #f85149; margin: 0 0 12px; }
+  h1 { font-size: 18px; margin: 0 0 8px; }
+  p { color: #8b949e; margin: 0; }
 </style></head>
-<body><form class="card" method="POST" action="${CONSENT_PATH}">
-  <h1>Authorize access</h1>
-  <p><span class="client">${escapeHtml(v.clientName)}</span> wants to connect to your ghidra-mcp server.</p>
-  ${v.error ? `<p class="err">${escapeHtml(v.error)}</p>` : ''}
-  <input type="password" name="password" placeholder="Connector password" autofocus required>
-  <button type="submit">Authorize</button>
-  ${hidden('client_id', v.clientId)}
-  ${hidden('redirect_uri', v.redirectUri)}
-  ${hidden('code_challenge', v.codeChallenge)}
-  ${hidden('state', v.state)}
-  ${hidden('scope', v.scope)}
-  ${hidden('resource', v.resource)}
-  ${hidden('sig', v.sig)}
-</form></body></html>`;
+<body><div class="card"><h1>${escapeHtml(title)}</h1><p>${escapeHtml(detail)}</p></div></body></html>`;
 }
