@@ -61,6 +61,7 @@ interface GhidraServerSpawnOptions {
   repo: string;
   programPath: string;
   serverUser: string;
+  serverPassword?: string;
 }
 
 interface SpawnOptions {
@@ -221,11 +222,12 @@ export class WorkerPool {
       '--daemon-url', daemonUrl,
     ];
 
+    let serverPasswordEnv: string | undefined;
     if (options.ghidraServer) {
       // Ghidra Server (shared repository) mode: connect to a remote server and open a
       // checked-out (writable) shared program; pass --read-only to open read-only instead.
       // Mutually exclusive with --binary/--project; the password is read by the worker
-      // from GHIDRA_SERVER_PASSWORD (inherited env).
+      // from GHIDRA_SERVER_PASSWORD (inherited env or overridden per-spawn).
       const srv = options.ghidraServer;
       args.push(
         '--ghidra-server', `${srv.host}:${srv.port}`,
@@ -233,6 +235,7 @@ export class WorkerPool {
         '--program', srv.programPath,
         '--server-user', srv.serverUser,
       );
+      serverPasswordEnv = srv.serverPassword;
     } else {
       args.push(
         '--binary', options.binaryPath,
@@ -253,12 +256,17 @@ export class WorkerPool {
       args.push('--read-only');
     }
 
+    const spawnEnv: Record<string, string | undefined> = {
+      ...process.env,
+      GHIDRA_HOME: ghidraPaths.ghidraHome,
+    };
+    if (serverPasswordEnv !== undefined) {
+      spawnEnv['GHIDRA_SERVER_PASSWORD'] = serverPasswordEnv;
+    }
+
     const proc = child_process.spawn(javaPath, args, {
       cwd: ghidraPaths.ghidraHome,
-      env: {
-        ...process.env,
-        GHIDRA_HOME: ghidraPaths.ghidraHome,
-      },
+      env: spawnEnv,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 

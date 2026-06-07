@@ -193,21 +193,25 @@ export class SessionManager {
     options?: SessionCreateOptions
   ): Promise<Session> {
     const parsed = parseGhidraServerUrl(url);
-    const serverUser = process.env.GHIDRA_SERVER_USER || 'mcp';
+    const serverUser = parsed.user ?? process.env.GHIDRA_SERVER_USER ?? 'mcp';
+    const serverPassword = parsed.password ?? process.env.GHIDRA_SERVER_PASSWORD;
     const ghidraServer: GhidraServerInfo = {
       host: parsed.host,
       port: parsed.port,
       repo: parsed.repo,
       programPath: parsed.programPath,
       serverUser,
+      serverPassword,
     };
 
-    // Dedup per-URL so repeated opens of the same shared program reuse the session.
-    const binaryHash = crypto.createHash('sha256').update(url).digest('hex');
+    // Dedup using canonical URL (no credentials) so the same resource matches regardless of
+    // how credentials were supplied.
+    const canonicalUrl = parsed.canonicalUrl;
+    const binaryHash = crypto.createHash('sha256').update(canonicalUrl).digest('hex');
     const programPath = parsed.programPath;
 
     for (const [id, state] of this.sessions) {
-      if (state.binaryPath === url || state.binaryHash === binaryHash) {
+      if (state.binaryPath === canonicalUrl || state.binaryHash === binaryHash) {
         if (state.status === 'error' && !state.workerId) {
           return this.respawnSession(id, state, options);
         }
@@ -245,7 +249,7 @@ export class SessionManager {
     const projectPath = path.join(getProjectsDir(), sessionId);
 
     const state: SessionState = {
-      binaryPath: url,
+      binaryPath: canonicalUrl,
       binaryHash,
       createdAt: new Date(),
       lastAccessedAt: new Date(),
@@ -280,7 +284,7 @@ export class SessionManager {
       }
 
       const workerId = await this.workerPool.spawnWorker(sessionId, {
-        binaryPath: url,
+        binaryPath: canonicalUrl,
         projectPath,
         programPath,
         autoAnalyze: options?.autoAnalyze ?? false,
@@ -686,6 +690,7 @@ interface GhidraServerInfo {
   repo: string;
   programPath: string;
   serverUser: string;
+  serverPassword?: string;
 }
 
 interface SessionState {
@@ -706,7 +711,7 @@ interface SessionState {
 }
 
 /**
- * Parse a `ghidra://HOST[:PORT]/REPO/PROGRAM/PATH` URL into its components.
+ * Parse a `ghidra://[user[:password]@]HOST[:PORT]/REPO/PROGRAM/PATH` URL into its components.
  * The first path segment is the repository name; the remainder (with a leading
  * slash) is the program path within that repository. Port defaults to 13100.
  */
@@ -715,6 +720,9 @@ export function parseGhidraServerUrl(url: string): {
   port: number;
   repo: string;
   programPath: string;
+  user?: string;
+  password?: string;
+  canonicalUrl: string;
 } {
   const rest = url.slice('ghidra://'.length);
   const slash = rest.indexOf('/');
@@ -724,9 +732,28 @@ export function parseGhidraServerUrl(url: string): {
   const authority = rest.slice(0, slash);
   const pathPart = rest.slice(slash + 1); // "REPO/PROGRAM/PATH"
 
-  const colon = authority.indexOf(':');
-  const host = colon >= 0 ? authority.slice(0, colon) : authority;
-  const port = colon >= 0 ? parseInt(authority.slice(colon + 1), 10) : 13100;
+  // Split user:password@host:port
+  const atSign = authority.lastIndexOf('@');
+  let user: string | undefined;
+  let password: string | undefined;
+  let hostPort: string;
+  if (atSign >= 0) {
+    const userInfo = authority.slice(0, atSign);
+    hostPort = authority.slice(atSign + 1);
+    const colonIdx = userInfo.indexOf(':');
+    if (colonIdx >= 0) {
+      user = decodeURIComponent(userInfo.slice(0, colonIdx));
+      password = decodeURIComponent(userInfo.slice(colonIdx + 1));
+    } else {
+      user = decodeURIComponent(userInfo);
+    }
+  } else {
+    hostPort = authority;
+  }
+
+  const colon = hostPort.lastIndexOf(':');
+  const host = colon >= 0 ? hostPort.slice(0, colon) : hostPort;
+  const port = colon >= 0 ? parseInt(hostPort.slice(colon + 1), 10) : 13100;
   if (!host || Number.isNaN(port)) {
     throw new Error(`Invalid ghidra:// host:port: ${url}`);
   }
@@ -741,5 +768,8 @@ export function parseGhidraServerUrl(url: string): {
     throw new Error(`Invalid ghidra:// URL (empty repo): ${url}`);
   }
 
-  return { host, port, repo, programPath };
+  // Canonical URL strips credentials so it's safe to store/log
+  const canonicalUrl = `ghidra://${host}:${port}/${repo}${programPath}`;
+
+  return { host, port, repo, programPath, user, password, canonicalUrl };
 }

@@ -99,11 +99,11 @@ export const sessionTools: ToolDefinition[] = [
     'Create a new Ghidra session for analyzing a binary or open an existing Ghidra project. ' +
     'Pass a binary path to import and analyze, or a .gpr file path to open an existing project. ' +
     'For .gpr projects with multiple programs, specify programPath to select which one to load. ' +
-    'Pass a ghidra://host:port/repo/program/path URL to open a shared program from a Ghidra Server (read-only).',
+    'Pass a ghidra://[user:password@]host:port/repo/program/path URL to open a shared program from a Ghidra Server.',
     {
       binaryPath: {
         type: 'string',
-        description: 'Path to the binary file to analyze, a path to an existing .gpr project file, or a ghidra://host:port/repo/program URL for a Ghidra Server shared program',
+        description: 'Path to the binary file to analyze, a path to an existing .gpr project file, or a ghidra://[user:password@]host:port/repo/program URL for a Ghidra Server shared program',
       },
       programPath: {
         type: 'string',
