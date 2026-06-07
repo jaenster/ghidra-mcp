@@ -30,10 +30,8 @@ jobs:
             ghcr.io/jaenster/${{ github.event.repository.name }}:latest
             ghcr.io/jaenster/${{ github.event.repository.name }}:${{ github.sha }}
 
-  # Pin the GitOps overlay to the freshly-built SHA so ArgoCD rolls it out
-  # (keeps git the source of truth — no in-cluster image-updater controller).
-  # Requires repo secret GITOPS_TOKEN: a fine-grained PAT with Contents:write
-  # on jaenster/gitops. Skipped automatically if the secret is absent.
+  # Pin the GitOps overlay to the freshly-built SHA so ArgoCD rolls it out.
+  # Uses a deploy key (GITOPS_SSH_KEY secret) with write access to jaenster/gitops.
   deploy:
     needs: build
     runs-on: ubuntu-latest
@@ -41,12 +39,16 @@ jobs:
     steps:
       - name: Bump image tag in GitOps repo
         env:
-          GITOPS_TOKEN: ${{ secrets.GITOPS_TOKEN }}
+          GITOPS_SSH_KEY: ${{ secrets.GITOPS_SSH_KEY }}
         run: |
-          if [ -z "$GITOPS_TOKEN" ]; then
-            echo "GITOPS_TOKEN not set — skipping GitOps bump."; exit 0
+          if [ -z "$GITOPS_SSH_KEY" ]; then
+            echo "GITOPS_SSH_KEY not set — skipping GitOps bump."; exit 0
           fi
-          git clone --depth 1 "https://x-access-token:${GITOPS_TOKEN}@github.com/jaenster/gitops.git" repo
+          mkdir -p ~/.ssh
+          echo "$GITOPS_SSH_KEY" > ~/.ssh/gitops_key
+          chmod 600 ~/.ssh/gitops_key
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/gitops_key -o StrictHostKeyChecking=no"
+          git clone --depth 1 git@github.com:jaenster/gitops.git repo
           cd repo
           F=gitops/projects/ghidra-mcp/overlays/ghidra/kustomization.yaml
           sed -i "s|newTag: .*|newTag: ${GITHUB_SHA}|" "$F"

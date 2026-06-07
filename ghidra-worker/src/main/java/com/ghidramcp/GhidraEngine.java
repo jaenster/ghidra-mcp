@@ -106,6 +106,10 @@ public class GhidraEngine {
         return projectOps.getProgramInfo();
     }
 
+    public String[] listRepos() throws Exception {
+        return projectOps.listRepos();
+    }
+
     public void save() throws Exception {
         projectOps.save();
     }

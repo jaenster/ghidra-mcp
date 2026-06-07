@@ -372,6 +372,14 @@ export const sharedStructureTools: ToolDefinition[] = [
 
 export const multiProgramTools: ToolDefinition[] = [
   defineTool(
+    'list_repos',
+    'List all repositories available on the configured Ghidra Server. Requires an active server session.',
+    {
+      ...sessionIdProp,
+    }
+  ),
+
+  defineTool(
     'list_programs',
     'List all programs in the open Ghidra project (.gpr). Shows which are loaded.',
     {

@@ -45,6 +45,8 @@ public class GhidraContext {
     // Active writable shared project (Ghidra Server write mode). Held so it can be closed on
     // shutdown. Null for local projects (which use the GhidraProject wrapper instead).
     private ghidra.framework.model.Project serverProject;
+    // Live connection to the Ghidra Server RMI endpoint (server mode only).
+    private ghidra.framework.client.RepositoryServerAdapter serverAdapter;
     private static boolean jythonInitialized = false;
     private long cacheVersion = 0;
 
@@ -104,6 +106,8 @@ public class GhidraContext {
     /** Register the checked-out DomainFile for a server program, keyed by its path. */
     public void putServerFile(String path, DomainFile serverFile) { this.serverFiles.put(path, serverFile); }
     public void setServerProject(ghidra.framework.model.Project serverProject) { this.serverProject = serverProject; }
+    public ghidra.framework.client.RepositoryServerAdapter getServerAdapter() { return serverAdapter; }
+    public void setServerAdapter(ghidra.framework.client.RepositoryServerAdapter serverAdapter) { this.serverAdapter = serverAdapter; }
     public void setReadOnly(boolean readOnly) { this.readOnly = readOnly; }
 
     // ============== Multi-program management ==============

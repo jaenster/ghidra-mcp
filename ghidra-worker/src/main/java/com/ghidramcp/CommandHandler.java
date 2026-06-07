@@ -44,6 +44,9 @@ public class CommandHandler {
             case "get_program_info":
                 return handleGetProgramInfo();
 
+            case "list_repos":
+                return handleListRepos();
+
             case "list_functions":
                 return handleListFunctions(params);
 
@@ -337,6 +340,13 @@ public class CommandHandler {
     private JsonObject handleGetProgramInfo() {
         GhidraEngine.ProgramInfo info = engine.getProgramInfo();
         return gson.toJsonTree(info).getAsJsonObject();
+    }
+
+    private JsonObject handleListRepos() throws Exception {
+        String[] repos = engine.listRepos();
+        JsonObject result = new JsonObject();
+        result.add("repos", gson.toJsonTree(repos));
+        return result;
     }
 
     private JsonObject handleListFunctions(JsonObject params) {

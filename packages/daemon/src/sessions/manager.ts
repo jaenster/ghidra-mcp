@@ -76,9 +76,14 @@ export class SessionManager {
     options?: SessionCreateOptions
   ): Promise<Session> {
     // Ghidra Server (shared repository) session: binaryPath is a ghidra:// URL
-    // rather than a local file. Skip filesystem resolution/hashing entirely.
+    // or a bare "repo/program/path" that gets auto-prefixed with the configured server.
     if (binaryPath.startsWith('ghidra://')) {
       return this.createServerSession(binaryPath, options);
+    }
+    const defaultHost = process.env.GHIDRA_SERVER_HOST;
+    if (defaultHost && !binaryPath.startsWith('/') && !binaryPath.match(/^[A-Za-z]:[/\\]/) && !binaryPath.endsWith('.gpr') && !binaryPath.startsWith('.')) {
+      const port = process.env.GHIDRA_SERVER_PORT ?? '13100';
+      return this.createServerSession(`ghidra://${defaultHost}:${port}/${binaryPath}`, options);
     }
 
     // Validate binary exists

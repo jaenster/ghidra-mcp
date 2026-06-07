@@ -306,6 +306,7 @@ public class ProjectOps {
         if (!server.isConnected()) {
             throw new IOException("Failed to connect to Ghidra Server " + host + ":" + port);
         }
+        ctx.setServerAdapter(server);
 
         ghidra.framework.client.RepositoryAdapter repo = server.getRepository(repoName);
         repo.connect();
@@ -640,6 +641,14 @@ public class ProjectOps {
         }
 
         return info;
+    }
+
+    public String[] listRepos() throws Exception {
+        ghidra.framework.client.RepositoryServerAdapter server = ctx.getServerAdapter();
+        if (server == null || !server.isConnected()) {
+            throw new Exception("Not connected to a Ghidra Server");
+        }
+        return server.getRepositoryNames();
     }
 
     /**
