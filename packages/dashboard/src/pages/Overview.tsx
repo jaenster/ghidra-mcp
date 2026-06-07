@@ -1,10 +1,25 @@
+import { useState } from 'react';
 import { usePolling } from '../hooks/usePolling';
-import { fetchHealth, fetchSessions } from '../api';
+import { fetchHealth, fetchSessions, closeSession } from '../api';
 import { StatusBadge } from '../components/StatusBadge';
 
 export function Overview() {
   const { data: health } = usePolling(fetchHealth, 5000);
-  const { data: sessions } = usePolling(fetchSessions, 5000);
+  const { data: sessions, refresh } = usePolling(fetchSessions, 5000);
+  const [closing, setClosing] = useState<string | null>(null);
+
+  async function onClose(id: string) {
+    if (!window.confirm('Close this session?')) return;
+    setClosing(id);
+    try {
+      await closeSession(id);
+      refresh();
+    } catch (e) {
+      window.alert(`Failed to close session: ${(e as Error).message}`);
+    } finally {
+      setClosing(null);
+    }
+  }
 
   return (
     <div>
@@ -27,6 +42,7 @@ export function Overview() {
               <th style={th}>Status</th>
               <th style={th}>Binary</th>
               <th style={th}>Created</th>
+              <th style={th}>Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -36,6 +52,15 @@ export function Overview() {
                 <td style={td}><StatusBadge status={s.status} /></td>
                 <td style={td}>{s.binaryPath?.split('/').pop() ?? '--'}</td>
                 <td style={td}>{new Date(s.createdAt).toLocaleString()}</td>
+                <td style={td}>
+                  <button
+                    onClick={() => onClose(s.id)}
+                    disabled={closing === s.id}
+                    style={actionBtn}
+                  >
+                    {closing === s.id ? 'Closing…' : 'Close'}
+                  </button>
+                </td>
               </tr>
             ))}
           </tbody>
@@ -70,3 +95,12 @@ function formatUptime(seconds: number): string {
 
 const th = { padding: '8px', color: '#888', fontSize: 12 } as const;
 const td = { padding: '8px', fontSize: 13 } as const;
+const actionBtn = {
+  background: '#3a1a1a',
+  color: '#f87171',
+  border: '1px solid #663333',
+  borderRadius: 4,
+  padding: '3px 8px',
+  fontSize: 12,
+  cursor: 'pointer',
+} as const;

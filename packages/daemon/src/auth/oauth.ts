@@ -54,6 +54,10 @@ export interface OAuthConfig {
   accessTtlSec: number;
   refreshTtlSec: number;
   oidc: OidcConfig;
+  /** Optional static bearer token for scripting/curl against the MCP endpoints. */
+  apiToken: string;
+  /** Lifetime of a browser dashboard session cookie. */
+  dashboardTtlSec: number;
 }
 
 function positiveInt(value: string | undefined, fallback: number): number {
@@ -83,12 +87,17 @@ export function getOAuthConfig(): OAuthConfig {
     accessTtlSec: positiveInt(process.env.GHIDRA_MCP_ACCESS_TTL, 3600),
     refreshTtlSec: positiveInt(process.env.GHIDRA_MCP_REFRESH_TTL, 30 * 24 * 3600),
     oidc,
+    apiToken: process.env.GHIDRA_MCP_API_TOKEN ?? '',
+    dashboardTtlSec: positiveInt(process.env.GHIDRA_MCP_DASHBOARD_TTL, 12 * 3600),
   };
 }
 
 const CODE_TTL_MS = 5 * 60 * 1000;
 const STATE_TTL_MS = 10 * 60 * 1000;
 const CALLBACK_PATH = '/oauth/authentik/callback';
+const DASH_LOGIN_PATH = '/dashboard/login';
+const DASH_CALLBACK_PATH = '/oauth/dashboard/callback';
+const DASH_COOKIE = 'ghidra_dash';
 
 function newSecret(): string {
   return randomBytes(32).toString('hex');
@@ -154,17 +163,55 @@ class DbClientsStore implements OAuthRegisteredClientsStore {
 
 export class GhidraOAuthProvider implements OAuthServerProvider {
   readonly clientsStore: DbClientsStore;
-  /** Key for signing the stateless upstream `state` envelope. */
-  private readonly stateKey: Buffer;
+  private readonly keys = new Map<string, Buffer>();
   private discoveryCache?: Promise<OidcEndpoints>;
 
   constructor(private db: StateDatabase, private config: OAuthConfig) {
     this.clientsStore = new DbClientsStore(db);
-    this.stateKey = createHash('sha256').update(`${config.secret}|oidc-state`).digest();
+  }
+
+  /** Per-purpose HMAC key derived from the server secret (cached). */
+  private key(label: string): Buffer {
+    let k = this.keys.get(label);
+    if (!k) {
+      k = createHash('sha256').update(`${this.config.secret}|${label}`).digest();
+      this.keys.set(label, k);
+    }
+    return k;
+  }
+
+  /** Sign an object into an opaque `body.sig` envelope under a labelled key. */
+  private signBlob(label: string, obj: Record<string, unknown>): string {
+    const body = Buffer.from(JSON.stringify({ ...obj, iat: Date.now() })).toString('base64url');
+    const sig = createHmac('sha256', this.key(label)).update(body).digest('base64url');
+    return `${body}.${sig}`;
+  }
+
+  /** Verify a `body.sig` envelope; returns the object or null if invalid/expired. */
+  private verifyBlob<T>(label: string, token: string, maxAgeMs: number): (T & { iat: number }) | null {
+    const dot = token.lastIndexOf('.');
+    if (dot < 0) return null;
+    const body = token.slice(0, dot);
+    const sig = token.slice(dot + 1);
+    const expected = createHmac('sha256', this.key(label)).update(body).digest('base64url');
+    if (sig.length !== expected.length || !timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) {
+      return null;
+    }
+    try {
+      const p = JSON.parse(b64urlDecode(body).toString('utf8')) as T & { iat?: number };
+      if (!p.iat || Date.now() - p.iat > maxAgeMs) return null;
+      return p as T & { iat: number };
+    } catch {
+      return null;
+    }
   }
 
   private callbackUrl(): string {
     return `${this.config.publicUrl}${CALLBACK_PATH}`;
+  }
+
+  dashCallbackUrl(): string {
+    return `${this.config.publicUrl}${DASH_CALLBACK_PATH}`;
   }
 
   /** Lazily fetch + cache the upstream OIDC discovery document. */
@@ -188,29 +235,44 @@ export class GhidraOAuthProvider implements OAuthServerProvider {
 
   /** Sign the pending-auth envelope into an opaque, tamper-proof `state` string. */
   private signState(p: Omit<PendingAuth, 'iat'>): string {
-    const payload: PendingAuth = { ...p, iat: Date.now() };
-    const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
-    const sig = createHmac('sha256', this.stateKey).update(body).digest('base64url');
-    return `${body}.${sig}`;
+    return this.signBlob('mcp-state', p);
   }
 
-  /** Verify a returned `state`, returning the pending auth or null if invalid/expired. */
+  /** Verify a returned MCP `state`, returning the pending auth or null if invalid/expired. */
   verifyState(state: string): PendingAuth | null {
-    const dot = state.lastIndexOf('.');
-    if (dot < 0) return null;
-    const body = state.slice(0, dot);
-    const sig = state.slice(dot + 1);
-    const expected = createHmac('sha256', this.stateKey).update(body).digest('base64url');
-    if (sig.length !== expected.length || !timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) {
-      return null;
-    }
-    try {
-      const p = JSON.parse(b64urlDecode(body).toString('utf8')) as PendingAuth;
-      if (!p.iat || Date.now() - p.iat > STATE_TTL_MS) return null;
-      return p;
-    } catch {
-      return null;
-    }
+    return this.verifyBlob<PendingAuth>('mcp-state', state, STATE_TTL_MS);
+  }
+
+  // ---- Browser dashboard session (separate from the MCP token flow) ----
+
+  /** Build the upstream login URL for the dashboard, returning to `rt` afterwards. */
+  async dashLoginUrl(rt: string): Promise<string> {
+    const ep = await this.discovery();
+    const state = this.signBlob('dash-state', { rt });
+    const u = new URL(ep.authorization_endpoint);
+    u.searchParams.set('response_type', 'code');
+    u.searchParams.set('client_id', this.config.oidc.clientId);
+    u.searchParams.set('redirect_uri', this.dashCallbackUrl());
+    u.searchParams.set('scope', 'openid profile email');
+    u.searchParams.set('state', state);
+    return u.href;
+  }
+
+  verifyDashState(state: string): { rt: string } | null {
+    return this.verifyBlob<{ rt: string }>('dash-state', state, STATE_TTL_MS);
+  }
+
+  /** Mint a signed Set-Cookie value for an authenticated dashboard session. */
+  dashCookie(sub: string): string {
+    const value = this.signBlob('dash-session', { sub });
+    const ttl = this.config.dashboardTtlSec;
+    return `${DASH_COOKIE}=${value}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${ttl}`;
+  }
+
+  /** Return the authenticated subject from a dashboard cookie, or null. */
+  verifyDashCookie(cookie: string): string | null {
+    const p = this.verifyBlob<{ sub: string }>('dash-session', cookie, this.config.dashboardTtlSec * 1000);
+    return p?.sub ?? null;
   }
 
   isAllowed(username?: unknown, email?: unknown): boolean {
@@ -250,12 +312,12 @@ export class GhidraOAuthProvider implements OAuthServerProvider {
    * return its claims. Confidential-client (client_secret) + direct TLS to the
    * token endpoint is the trust anchor; iss/aud/exp are checked from the payload.
    */
-  async exchangeUpstreamCode(code: string): Promise<Record<string, unknown>> {
+  async exchangeUpstreamCode(code: string, redirectUri: string = this.callbackUrl()): Promise<Record<string, unknown>> {
     const ep = await this.discovery();
     const body = new URLSearchParams({
       grant_type: 'authorization_code',
       code,
-      redirect_uri: this.callbackUrl(),
+      redirect_uri: redirectUri,
       client_id: this.config.oidc.clientId,
       client_secret: this.config.oidc.clientSecret,
     });
@@ -324,6 +386,15 @@ export class GhidraOAuthProvider implements OAuthServerProvider {
   }
 
   async verifyAccessToken(accessToken: string): Promise<AuthInfo> {
+    // Static API token for scripting/curl — full scopes, never expires.
+    if (this.config.apiToken && safeEqual(accessToken, this.config.apiToken)) {
+      return {
+        token: accessToken,
+        clientId: 'api-token',
+        scopes: this.config.scopesSupported,
+        expiresAt: Math.floor(Date.now() / 1000) + this.config.accessTtlSec,
+      };
+    }
     const stored = this.db.getOAuthToken(hash(accessToken));
     if (!stored || stored.kind !== 'access') throw new InvalidTokenError('Invalid access token');
     const expiresAt = stored.expiresAt ?? 0;
@@ -405,10 +476,52 @@ export class GhidraOAuthProvider implements OAuthServerProvider {
  */
 export function installOAuth(app: Express, db: StateDatabase, config: OAuthConfig): {
   requireAuth: RequestHandler;
+  requireDashboardAuth: RequestHandler;
   provider: GhidraOAuthProvider;
 } {
   const issuerUrl = new URL(config.publicUrl);
   const provider = new GhidraOAuthProvider(db, config);
+
+  // --- Browser dashboard auth (Authentik-gated, cookie session) ---
+
+  // Kick off the upstream login for the dashboard.
+  app.get(DASH_LOGIN_PATH, async (req: Request, res: Response) => {
+    const rtRaw = typeof req.query.rt === 'string' ? req.query.rt : '/dashboard';
+    const rt = rtRaw.startsWith('/dashboard') ? rtRaw : '/dashboard';
+    try {
+      res.redirect(302, await provider.dashLoginUrl(rt));
+    } catch {
+      res.status(502).setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.send(renderError('Login unavailable', 'Could not reach the identity provider.'));
+    }
+  });
+
+  // Upstream callback for the dashboard: validate, allowlist, set session cookie.
+  app.get(DASH_CALLBACK_PATH, async (req: Request, res: Response) => {
+    const { code, state, error } = req.query as Record<string, string>;
+    const st = state ? provider.verifyDashState(state) : null;
+    if (error || !st || !code) {
+      res.status(400).setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.send(renderError('Login failed', 'The login request was invalid or expired. Please try again.'));
+      return;
+    }
+    let claims: Record<string, unknown>;
+    try {
+      claims = await provider.exchangeUpstreamCode(code, provider.dashCallbackUrl());
+    } catch {
+      res.status(502).setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.send(renderError('Login failed', 'Could not verify your identity with the upstream provider.'));
+      return;
+    }
+    if (!provider.isAllowed(claims.preferred_username, claims.email)) {
+      res.status(403).setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.send(renderError('Access denied', 'Your account is not authorized to use this dashboard.'));
+      return;
+    }
+    const sub = String(claims.preferred_username ?? claims.email ?? 'user');
+    res.setHeader('Set-Cookie', provider.dashCookie(sub));
+    res.redirect(302, st.rt);
+  });
 
   // Upstream OIDC callback — validate the ID token, enforce the allowlist, then
   // resume the MCP flow by minting our own authorization code.
@@ -480,7 +593,33 @@ export function installOAuth(app: Express, db: StateDatabase, config: OAuthConfi
   const resourceMetadataUrl = getOAuthProtectedResourceMetadataUrl(issuerUrl);
   const requireAuth = requireBearerAuth({ verifier: provider, resourceMetadataUrl });
 
-  return { requireAuth, provider };
+  // Gate the browser dashboard + its /api/* on a valid session cookie. XHR/API
+  // callers get 401; navigations are bounced through the upstream login.
+  const requireDashboardAuth: RequestHandler = (req, res, next) => {
+    const cookie = readCookie(req.headers.cookie, DASH_COOKIE);
+    if (cookie && provider.verifyDashCookie(cookie)) {
+      next();
+      return;
+    }
+    if (req.path.startsWith('/api/') || req.xhr || req.headers.accept?.includes('application/json')) {
+      res.status(401).json({ error: 'unauthorized' });
+      return;
+    }
+    res.redirect(302, `${DASH_LOGIN_PATH}?rt=${encodeURIComponent(req.originalUrl)}`);
+  };
+
+  return { requireAuth, requireDashboardAuth, provider };
+}
+
+/** Minimal Cookie header parser for a single name (no cookie-parser dependency). */
+function readCookie(header: string | undefined, name: string): string | undefined {
+  if (!header) return undefined;
+  for (const part of header.split(';')) {
+    const eq = part.indexOf('=');
+    if (eq < 0) continue;
+    if (part.slice(0, eq).trim() === name) return part.slice(eq + 1).trim();
+  }
+  return undefined;
 }
 
 function escapeHtml(s: string): string {

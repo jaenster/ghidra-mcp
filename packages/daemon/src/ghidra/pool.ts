@@ -592,6 +592,31 @@ export class WorkerPool {
   }
 
   /**
+   * Force-kill a worker by OS signal — no graceful shutdown, no save. Used by the
+   * dashboard "unstick" action: kills a hung/stuck worker so a fresh one spawns on
+   * next use and auto-clears any stale server project lock. Works for both managed
+   * and adopted workers (the latter has no child handle, only a pid).
+   */
+  forceKillWorker(workerId: string): boolean {
+    const state = this.workers.get(workerId);
+    if (!state) return false;
+
+    state.status = 'stopping';
+    // Reject anything in flight so callers don't hang on the dead worker.
+    for (const pending of state.pendingCommands.values()) {
+      pending.reject(new Error('Worker force-killed'));
+    }
+    state.pendingCommands.clear();
+
+    if (typeof state.pid === 'number') {
+      try { process.kill(state.pid, 'SIGKILL'); } catch { /* already gone */ }
+    }
+    state.process?.kill('SIGKILL');
+    this.workers.delete(workerId);
+    return true;
+  }
+
+  /**
    * Shutdown all workers
    */
   async shutdownAll(): Promise<void> {

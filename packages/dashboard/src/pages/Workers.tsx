@@ -1,7 +1,7 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { usePolling } from '../hooks/usePolling';
 import { useSse } from '../hooks/useSse';
-import { fetchWorkers } from '../api';
+import { fetchWorkers, killWorker } from '../api';
 import { StatusBadge } from '../components/StatusBadge';
 import { MemoryChart } from '../components/MemoryChart';
 
@@ -44,11 +44,25 @@ function ThreadPool({ threads }: { threads?: { readPoolSize: number; readPoolAct
 
 export function Workers() {
   const { data: workers, refresh } = usePolling(fetchWorkers, 5000);
+  const [killing, setKilling] = useState<string | null>(null);
 
   // Also listen for heartbeat events to update more frequently
   useSse('/api/dashboard/events', {
     heartbeat: () => refresh(),
   });
+
+  async function onKill(id: string) {
+    if (!window.confirm('Force-kill (unstick) this worker? A fresh one will respawn.')) return;
+    setKilling(id);
+    try {
+      await killWorker(id);
+      refresh();
+    } catch (e) {
+      window.alert(`Failed to kill worker: ${(e as Error).message}`);
+    } finally {
+      setKilling(null);
+    }
+  }
 
   return (
     <div>
@@ -65,6 +79,7 @@ export function Workers() {
               <th style={th}>Threads</th>
               <th style={th}>Memory</th>
               <th style={th}>Last Heartbeat</th>
+              <th style={th}>Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -82,6 +97,15 @@ export function Workers() {
                 <td style={td}>
                   {w.lastHeartbeat ? `${Math.round((Date.now() - w.lastHeartbeat) / 1000)}s ago` : '--'}
                 </td>
+                <td style={td}>
+                  <button
+                    onClick={() => onKill(w.id)}
+                    disabled={killing === w.id}
+                    style={actionBtn}
+                  >
+                    {killing === w.id ? 'Killing…' : 'Unstick'}
+                  </button>
+                </td>
               </tr>
             ))}
           </tbody>
@@ -95,3 +119,12 @@ export function Workers() {
 
 const th = { padding: '8px', color: '#888', fontSize: 12 } as const;
 const td = { padding: '8px', fontSize: 13 } as const;
+const actionBtn = {
+  background: '#3a1a1a',
+  color: '#f87171',
+  border: '1px solid #663333',
+  borderRadius: 4,
+  padding: '3px 8px',
+  fontSize: 12,
+  cursor: 'pointer',
+} as const;

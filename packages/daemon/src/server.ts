@@ -55,12 +55,21 @@ export async function createServer(options: ServerOptions): Promise<{
   // dashboard, and the internal worker API stay open (the latter must not be
   // exposed by the ingress — only loopback / in-pod traffic reaches it).
   const oauthConfig = getOAuthConfig();
-  const requireAuth: RequestHandler = oauthConfig.enabled
-    ? installOAuth(app, options.database, oauthConfig).requireAuth
-    : (_req, _res, next) => next();
-  if (oauthConfig.enabled && options.logger) {
-    options.logger.info('OAuth enabled for MCP endpoints', { issuer: oauthConfig.publicUrl });
+  const passthrough: RequestHandler = (_req, _res, next) => next();
+  let requireAuth: RequestHandler = passthrough;
+  let requireDashboardAuth: RequestHandler = passthrough;
+  if (oauthConfig.enabled) {
+    const installed = installOAuth(app, options.database, oauthConfig);
+    requireAuth = installed.requireAuth;
+    requireDashboardAuth = installed.requireDashboardAuth;
+    if (options.logger) {
+      options.logger.info('OAuth enabled for MCP endpoints', { issuer: oauthConfig.publicUrl });
+    }
   }
+
+  // Gate the dashboard's JSON API behind the Authentik session cookie (no-op when
+  // auth is disabled). Must precede the /api route handlers below.
+  app.use('/api', requireDashboardAuth);
 
   // Health check endpoint
   app.get('/health', (_req: Request, res: Response) => {
@@ -148,6 +157,17 @@ export async function createServer(options: ServerOptions): Promise<{
     res.json({ workers: workerPool.getWorkerStates() });
   });
 
+  // Force-kill ("unstick") a hung worker — a fresh one spawns on next use and
+  // auto-clears any stale server project lock left behind.
+  app.post('/api/workers/:workerId/kill', (req: Request, res: Response) => {
+    const killed = workerPool.forceKillWorker(req.params.workerId);
+    if (!killed) {
+      res.status(404).json({ error: 'Unknown worker' });
+      return;
+    }
+    res.json({ success: true });
+  });
+
   // Command history
   app.get('/api/commands', (req: Request, res: Response) => {
     const { commandLog } = options;
@@ -197,8 +217,8 @@ export async function createServer(options: ServerOptions): Promise<{
       '../../dashboard/dist'
     );
     if (fs.existsSync(dashboardDist)) {
-      app.use('/dashboard', express.static(dashboardDist));
-      app.get('/dashboard/*', (_req: Request, res: Response) => {
+      app.use('/dashboard', requireDashboardAuth, express.static(dashboardDist));
+      app.get('/dashboard/*', requireDashboardAuth, (_req: Request, res: Response) => {
         res.sendFile(path.resolve(dashboardDist, 'index.html'));
       });
     }
