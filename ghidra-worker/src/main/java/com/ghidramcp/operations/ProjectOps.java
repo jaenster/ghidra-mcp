@@ -323,10 +323,17 @@ public class ProjectOps {
         }
         log.info("Connected to repository '" + repoName + "', itemCount=" + repo.getItemCount());
 
-        // Open (or create) a persistent local shared project on the /data PVC that is linked
-        // to the repository.  This gives checkout/checkin a real project to work against and
-        // keeps the working copy on disk across worker restarts.
-        File projectRoot = new File("/data/ghidra-projects");
+        // Open (or create) a persistent local project on the /data PVC, linked to the repository.
+        // This gives checkout/checkin a real project to work against and keeps the working copy on
+        // disk across worker restarts. Root it at the PER-SESSION projects dir (ctx.getProjectPath()
+        // = /data/projects/<sessionId>) rather than a single shared /data/ghidra-projects/<repo>:
+        // every worker thus gets its own project dir, so two workers on the SAME repo don't fight
+        // over one Ghidra project lock (each takes its own non-exclusive checkout). The sessionId is
+        // stable across sticky reopens, so the working copy still survives worker/pod restarts.
+        String sessionProjectPath = ctx.getProjectPath();
+        File projectRoot = (sessionProjectPath != null && !sessionProjectPath.isEmpty())
+                ? new File(sessionProjectPath)
+                : new File("/data/ghidra-projects");
         if (!projectRoot.exists()) {
             projectRoot.mkdirs();
         }
@@ -344,9 +351,9 @@ public class ProjectOps {
                     ? pm.openProject(locator, false, true)
                     : pm.createProject(locator, repo, false);
         } catch (ghidra.framework.store.LockException le) {
-            // The daemon reuses ONE worker per repo, so it only spawns a fresh worker when no
-            // live worker holds this project. Any lock here is therefore a STALE lock left by a
-            // worker that was killed (pod restart / crash) without releasing it — safe to clear.
+            // The project dir is per-session (/data/projects/<sessionId>), so the only thing that
+            // could hold this lock is a prior worker for THIS same session that was killed (pod
+            // restart / crash) without releasing it. That lock is stale — safe to clear and retry.
             File lockFile = locator.getProjectLockFile();
             ctx.getLog().warn("Stale project lock (dead worker), clearing and retrying: " +
                     (lockFile != null ? lockFile.getAbsolutePath() : locator.getName()) + " — " + le.getMessage());
@@ -762,7 +769,10 @@ public class ProjectOps {
                 }
             }
             ctx.putServerFile(path, df);
-            program = (Program) df.getDomainObject(ctx, false, false, monitor);
+            // okToUpgrade=true: same minor-language-upgrade handling as the primary open
+            // (openServerProgram) — a newer Ghidra opening an older-saved program would otherwise
+            // abort with LanguageVersionException and leave the program unregistered.
+            program = (Program) df.getDomainObject(ctx, true, false, monitor);
         }
 
         FlatProgramAPI flatApi = new FlatProgramAPI(program);
