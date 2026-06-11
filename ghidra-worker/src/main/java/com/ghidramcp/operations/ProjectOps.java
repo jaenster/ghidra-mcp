@@ -345,25 +345,7 @@ public class ProjectOps {
         // already exists on disk we open it (resetOwner=false, doRestore=true) to reuse the prior
         // checkout state; otherwise we create it linked to the repository.
         WorkerProjectManager pm = new WorkerProjectManager();
-        Project project;
-        try {
-            project = locator.exists()
-                    ? pm.openProject(locator, false, true)
-                    : pm.createProject(locator, repo, false);
-        } catch (ghidra.framework.store.LockException le) {
-            // The project dir is per-session (/data/projects/<sessionId>), so the only thing that
-            // could hold this lock is a prior worker for THIS same session that was killed (pod
-            // restart / crash) without releasing it. That lock is stale — safe to clear and retry.
-            File lockFile = locator.getProjectLockFile();
-            ctx.getLog().warn("Stale project lock (dead worker), clearing and retrying: " +
-                    (lockFile != null ? lockFile.getAbsolutePath() : locator.getName()) + " — " + le.getMessage());
-            if (lockFile != null && lockFile.exists()) {
-                lockFile.delete();
-            }
-            project = locator.exists()
-                    ? pm.openProject(locator, false, true)
-                    : pm.createProject(locator, repo, false);
-        }
+        Project project = openProjectRecoveringStaleLock(pm, locator, repo, projectRoot);
         ctx.setServerProject(project);
         ProjectData projectData = project.getProjectData();
         ctx.setProjectData(projectData);
@@ -820,6 +802,69 @@ public class ProjectOps {
     }
 
     // ============== Private helpers ==============
+
+    /**
+     * Open (or create) the per-session local project, auto-recovering from a stale lock.
+     *
+     * The project dir is per-session (/data/projects/&lt;sessionId&gt;), so the only thing that can
+     * hold its lock is a prior worker JVM for THIS same session that was killed (pod restart /
+     * crash) without releasing it. Recovery: kill any such leftover JVM (matched by the per-session
+     * project dir on its command line, so peer-session workers on the same repo are never touched),
+     * delete the lock file, and retry a few times.
+     */
+    private Project openProjectRecoveringStaleLock(WorkerProjectManager pm, ProjectLocator locator,
+            ghidra.framework.client.RepositoryAdapter repo, File projectRoot) throws Exception {
+        ghidra.framework.store.LockException last = null;
+        for (int attempt = 0; attempt < 3; attempt++) {
+            try {
+                return locator.exists()
+                        ? pm.openProject(locator, false, true)
+                        : pm.createProject(locator, repo, false);
+            } catch (ghidra.framework.store.LockException le) {
+                last = le;
+                File lockFile = locator.getProjectLockFile();
+                ctx.getLog().warn("Project locked (attempt " + (attempt + 1) + "), killing any stale "
+                        + "holder and clearing lock: "
+                        + (lockFile != null ? lockFile.getAbsolutePath() : locator.getName())
+                        + " — " + le.getMessage());
+                killStaleLockHolders(projectRoot);
+                if (lockFile != null && lockFile.exists()) {
+                    lockFile.delete();
+                }
+                try {
+                    Thread.sleep(500);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+        }
+        throw last;
+    }
+
+    /**
+     * Force-kill any OTHER JVM whose command line references this per-session project dir — i.e. a
+     * dead-but-unreaped prior worker for the same session still holding the project lock. Matching on
+     * the full per-session dir path (the worker's {@code --project} arg) guarantees we never kill a
+     * live peer-session worker that happens to share the same repo.
+     */
+    private void killStaleLockHolders(File projectRoot) {
+        final String dir = projectRoot.getAbsolutePath();
+        final long self = ProcessHandle.current().pid();
+        final Logger log = ctx.getLog();
+        try {
+            ProcessHandle.allProcesses()
+                    .filter(ph -> ph.pid() != self)
+                    .filter(ph -> ph.info().commandLine().map(cl -> cl.contains(dir)).orElse(false))
+                    .forEach(ph -> {
+                        log.warn("Killing stale worker holding project lock (pid=" + ph.pid()
+                                + ", dir=" + dir + ")");
+                        ph.destroyForcibly();
+                    });
+        } catch (Exception e) {
+            log.warn("Could not enumerate/kill stale lock holders for " + dir + ": " + e.getMessage());
+        }
+    }
 
     /**
      * Recursively collect all Program files in a DomainFolder.
