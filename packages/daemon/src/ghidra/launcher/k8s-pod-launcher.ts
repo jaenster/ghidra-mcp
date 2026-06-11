@@ -157,11 +157,30 @@ export class K8sPodLauncher implements WorkerLauncher {
       phase === 'Succeeded';
     if (!terminal) return;
 
-    if (this.stopping.has(podName)) return; // we deleted it on purpose
+    if (this.stopping.has(podName)) return; // we deleted it on purpose (or already handled)
+    // Mark handled so the delete below (and its follow-up DELETED event) don't re-fire.
+    this.stopping.add(podName);
+    setTimeout(() => this.stopping.delete(podName), 10000).unref?.();
 
     const reason = `pod:${type}:${phase ?? 'deleted'}`;
     console.log(`[K8sPodLauncher] worker ${workerId} pod ${podName} terminal (${reason})`);
     this.diedHandler?.(workerId, reason, null, null);
+
+    // Reap a crashed/completed pod so it doesn't linger in Error (restartPolicy: Never +
+    // ownerRef GC only fires on daemon death). Skip if it's already being deleted.
+    if (type !== 'DELETED') this.reapPod(podName);
+  }
+
+  private reapPod(podName: string): void {
+    this.client()
+      .then((c) =>
+        c.core.deleteNamespacedPod({ namespace: c.namespace, name: podName, gracePeriodSeconds: 0 }),
+      )
+      .catch((e: any) => {
+        if (e?.code !== 404 && e?.statusCode !== 404) {
+          console.warn(`[K8sPodLauncher] reap pod ${podName} failed: ${e?.message ?? e}`);
+        }
+      });
   }
 
   private buildPodManifest(spec: LaunchSpec, podName: string, c: KubeClient): any {
