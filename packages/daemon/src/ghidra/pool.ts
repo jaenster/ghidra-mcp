@@ -232,14 +232,17 @@ export class WorkerPool {
     if (options.ghidraServer) {
       // Ghidra Server (shared repository) mode: connect to a remote server and open a
       // checked-out (writable) shared program; pass --read-only to open read-only instead.
-      // Mutually exclusive with --binary/--project; the password is read by the worker
-      // from GHIDRA_SERVER_PASSWORD (inherited env or overridden per-spawn).
+      // Mutually exclusive with --binary; the password is read by the worker from
+      // GHIDRA_SERVER_PASSWORD (inherited env or overridden per-spawn). --project is still
+      // passed: it roots the worker's LOCAL project at the per-session dir so two workers on
+      // the same repo don't collide on one Ghidra project lock.
       const srv = options.ghidraServer;
       args.push(
         '--ghidra-server', `${srv.host}:${srv.port}`,
         '--repo', srv.repo,
         '--program', srv.programPath,
         '--server-user', srv.serverUser,
+        '--project', options.projectPath,
       );
       serverPasswordEnv = srv.serverPassword;
     } else {
