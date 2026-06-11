@@ -380,8 +380,11 @@ public class ProjectOps {
                                           + df.getPathname());
                 }
             }
-            // okToUpgrade=false: server and programs are the same Ghidra version.
-            program = (Program) df.getDomainObject(ctx, false, false, monitor);
+            // okToUpgrade=true: a newer Ghidra (e.g. 12.1.2 vs the 12.1 the program was
+            // saved under) ships a newer processor spec, so opening triggers a minor
+            // language version change (e.g. x86 4.6 -> 4.7). Permit the in-place upgrade;
+            // it only persists to the repo if this working copy is later checked in.
+            program = (Program) df.getDomainObject(ctx, true, false, monitor);
         }
 
         String path = df.getPathname();
