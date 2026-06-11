@@ -346,6 +346,42 @@ export function getDaemonUrl(port: number = getDaemonPort()): string {
 }
 
 // =============================================================================
+// Worker backend (how a worker is launched)
+// =============================================================================
+
+export type WorkerBackend = 'process' | 'k8s';
+
+/**
+ * How the daemon launches each Ghidra worker:
+ *  - 'process' (default): a local child-process JVM, co-located with the daemon.
+ *  - 'k8s': one Kubernetes pod per worker, connecting back over the cluster network.
+ * Set GHIDRA_MCP_WORKER_BACKEND=k8s in the cluster Deployment.
+ */
+export function getWorkerBackend(): WorkerBackend {
+  return process.env.GHIDRA_MCP_WORKER_BACKEND?.trim() === 'k8s' ? 'k8s' : 'process';
+}
+
+/**
+ * Container image used for worker pods (k8s backend). The worker runs the SAME
+ * image as the daemon (it bundles Java + Ghidra + the worker jar); only the
+ * entry command differs. CI bumps this alongside the daemon image tag.
+ */
+export function getWorkerImage(): string | undefined {
+  return process.env.GHIDRA_MCP_WORKER_IMAGE?.trim() || undefined;
+}
+
+/**
+ * Base URL a WORKER POD uses to reach the daemon's /internal API (k8s backend).
+ * Must be the in-cluster Service DNS, e.g.
+ * http://ghidra-mcp.ghidra-mcp.svc.cluster.local. Distinct from GHIDRA_MCP_DAEMON_URL
+ * (getDaemonUrl) so the daemon's own loopback isn't affected.
+ */
+export function getWorkerDaemonUrl(): string | undefined {
+  const v = process.env.GHIDRA_MCP_WORKER_DAEMON_URL?.trim();
+  return v ? v.replace(/\/+$/, '') : undefined;
+}
+
+// =============================================================================
 // Utility Functions
 // =============================================================================
 

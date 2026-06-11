@@ -2,7 +2,6 @@
  * Ghidra worker process pool
  */
 
-import * as child_process from 'node:child_process';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import * as crypto from 'node:crypto';
@@ -12,8 +11,8 @@ import {
   getWorkerJarPath,
   getMemoryLimit,
   getDaemonPort,
-  getDaemonUrl,
 } from '@ghidra-mcp/shared/platform';
+import { selectLauncher, type WorkerLauncher, type WorkerHandle } from './launcher/launcher.js';
 import type {
   WorkerCommand,
   WorkerResponse,
@@ -29,7 +28,8 @@ import type { Logger } from '../logging/logger.js';
 interface WorkerState {
   id: string;
   sessionId: string;
-  process: child_process.ChildProcess | null;  // null for adopted (reconnected) workers
+  /** The launcher owns the actual process/pod; null until launched and for adopted workers. */
+  handle: WorkerHandle | null;
   status: 'starting' | 'idle' | 'busy' | 'stopping' | 'stopped';
   pid?: number;
   startTime: number;
@@ -88,6 +88,7 @@ export class WorkerPool {
   private log: Logger | null = null;
   private onWorkerExitCallback?: (workerId: string, sessionId: string, code: number | null, signal: string | null) => void;
   private stalenessTimer: NodeJS.Timeout;
+  private launcherPromise?: Promise<WorkerLauncher>;
 
   constructor(options: WorkerPoolOptions = {}) {
     // Each worker is its own Ghidra JVM at -Xmx${GHIDRA_MCP_MEMORY}. The pool MUST
@@ -106,24 +107,51 @@ export class WorkerPool {
   }
 
   /**
-   * Check adopted workers for stale heartbeats (no heartbeat in 60s)
+   * The worker launch backend (process or k8s), created lazily on first use.
+   * Registers the single death handler that drives all cleanup.
+   */
+  private getLauncher(): Promise<WorkerLauncher> {
+    if (!this.launcherPromise) {
+      this.launcherPromise = selectLauncher().then((launcher) => {
+        launcher.onWorkerDied((workerId, reason, code, signal) => {
+          console.log(`[WorkerPool] worker ${workerId} died (${reason})`);
+          this.markWorkerDead(workerId, code, signal);
+        });
+        console.log(`[WorkerPool] worker backend: ${launcher.backend}`);
+        return launcher;
+      });
+    }
+    return this.launcherPromise;
+  }
+
+  /**
+   * Tear down a dead worker: reject in-flight commands, drop it from the pool (so it
+   * stops counting against maxWorkers), and notify the session manager. Idempotent.
+   */
+  private markWorkerDead(workerId: string, code: number | null, signal: string | null): void {
+    const state = this.workers.get(workerId);
+    if (!state) return;
+    state.status = 'stopped';
+    for (const pending of state.pendingCommands.values()) {
+      clearTimeout(pending.timeout);
+      pending.reject(new Error('Worker exited'));
+    }
+    state.pendingCommands.clear();
+    this.workers.delete(workerId);
+    this.onWorkerExitCallback?.(workerId, state.sessionId, code, signal);
+  }
+
+  /**
+   * Heartbeat backstop: if a worker (process or pod) goes silent for >60s and the
+   * launcher's primary death signal (child 'exit' / pod watch) didn't fire, reap it.
    */
   private checkHeartbeatStaleness(): void {
     const now = Date.now();
     for (const [workerId, state] of this.workers) {
-      // Only check adopted workers (process === null) that are still active
-      if (state.process === null && state.status !== 'stopped' && state.status !== 'stopping') {
-        if (state.lastHeartbeat && now - state.lastHeartbeat > 60000) {
-          console.log(`[WorkerPool] Adopted worker ${workerId} heartbeat stale (>${Math.round((now - state.lastHeartbeat) / 1000)}s)`);
-          state.status = 'stopped';
-          for (const pending of state.pendingCommands.values()) {
-            clearTimeout(pending.timeout);
-            pending.reject(new Error('Worker heartbeat stale'));
-          }
-          state.pendingCommands.clear();
-          this.workers.delete(workerId);
-          this.onWorkerExitCallback?.(workerId, state.sessionId, null, null);
-        }
+      if (state.status === 'stopped' || state.status === 'stopping') continue;
+      if (state.lastHeartbeat && now - state.lastHeartbeat > 60000) {
+        console.log(`[WorkerPool] worker ${workerId} heartbeat stale (>${Math.round((now - state.lastHeartbeat) / 1000)}s)`);
+        this.markWorkerDead(workerId, null, null);
       }
     }
   }
@@ -213,9 +241,12 @@ export class WorkerPool {
 
     const classpath = classpathParts.join(path.delimiter);
 
-    // Loopback by default (worker is co-located); GHIDRA_MCP_DAEMON_URL overrides
-    const daemonUrl = getDaemonUrl(daemonPort);
-    console.log(`[WorkerPool] Spawning worker with daemon URL: ${daemonUrl}`);
+    const launcher = await this.getLauncher();
+    // The launcher decides where the worker reaches the daemon (loopback for a local
+    // child process, the Service DNS for a pod) and where its local project lives.
+    const daemonUrl = launcher.daemonUrl(daemonPort);
+    const projectDir = launcher.projectDir(sessionId, options.projectPath);
+    console.log(`[WorkerPool] Spawning worker (${launcher.backend}) with daemon URL: ${daemonUrl}`);
 
     const args = [
       `-Xmx${memoryLimit}`,
@@ -242,13 +273,13 @@ export class WorkerPool {
         '--repo', srv.repo,
         '--program', srv.programPath,
         '--server-user', srv.serverUser,
-        '--project', options.projectPath,
+        '--project', projectDir,
       );
       serverPasswordEnv = srv.serverPassword;
     } else {
       args.push(
         '--binary', options.binaryPath,
-        '--project', options.projectPath,
+        '--project', projectDir,
       );
       if (options.programPath) {
         args.push('--program-path', options.programPath);
@@ -273,18 +304,25 @@ export class WorkerPool {
       spawnEnv['GHIDRA_SERVER_PASSWORD'] = serverPasswordEnv;
     }
 
-    const proc = child_process.spawn(javaPath, args, {
+    const workerLog = this.log ? createLogger(this.log.store, `Worker:${sessionId}:${workerId.slice(0, 8)}`) : null;
+
+    const handle = await launcher.launch({
+      workerId,
+      sessionId,
+      javaPath,
+      javaArgs: args,
       cwd: ghidraPaths.ghidraHome,
       env: spawnEnv,
-      stdio: ['pipe', 'pipe', 'pipe'],
+      memory: memoryLimit,
+      onStderr: (line) => workerLog?.error(line),
     });
 
     const state: WorkerState = {
       id: workerId,
       sessionId,
-      process: proc,
+      handle,
       status: 'starting',
-      pid: proc.pid,
+      pid: handle.pid,
       startTime: Date.now(),
       activeCommands: 0,
       memorySamples: [],
@@ -294,44 +332,6 @@ export class WorkerPool {
     };
 
     this.workers.set(workerId, state);
-
-    // Handle process output
-    proc.stdout?.on('data', (data) => {
-      console.log(`[Worker ${workerId}] ${data.toString().trim()}`);
-    });
-
-    const workerLog = this.log ? createLogger(this.log.store, `Worker:${sessionId}:${workerId.slice(0, 8)}`) : null;
-
-    proc.stderr?.on('data', (data) => {
-      const msg = data.toString().trim();
-      console.error(`[Worker ${workerId}] ERROR: ${msg}`);
-      workerLog?.error(msg);
-    });
-
-    proc.on('exit', (code, signal) => {
-      console.log(`[Worker ${workerId}] Exited with code ${code}, signal ${signal}`);
-      workerLog?.error(`Worker exited (code=${code}, signal=${signal})`);
-      state.status = 'stopped';
-
-      // Reject all pending commands
-      for (const pending of state.pendingCommands.values()) {
-        clearTimeout(pending.timeout);
-        pending.reject(new Error('Worker exited'));
-      }
-      state.pendingCommands.clear();
-
-      // Remove dead worker from pool so it doesn't count against maxWorkers
-      this.workers.delete(workerId);
-
-      // Notify session manager of worker death
-      this.onWorkerExitCallback?.(workerId, sessionId, code, signal);
-    });
-
-    proc.on('error', (error) => {
-      console.error(`[Worker ${workerId}] Error:`, error);
-      state.status = 'stopped';
-    });
-
     return workerId;
   }
 
@@ -387,20 +387,13 @@ export class WorkerPool {
       throw new Error('Worker has stopped');
     }
 
-    // For adopted workers (no child process), check if PID is still alive
-    if (state.process === null && state.pid) {
+    // Liveness check by local PID — valid for local child processes and adopted
+    // (reconnected) workers, but NOT k8s workers (their pid is in another pod).
+    if (state.handle?.backend !== 'k8s' && state.pid) {
       try {
         process.kill(state.pid, 0); // signal 0 = liveness check
       } catch {
-        // PID is dead — trigger death handling immediately
-        state.status = 'stopped';
-        for (const pending of state.pendingCommands.values()) {
-          clearTimeout(pending.timeout);
-          pending.reject(new Error('Worker exited'));
-        }
-        state.pendingCommands.clear();
-        this.workers.delete(workerId);
-        this.onWorkerExitCallback?.(workerId, state.sessionId, null, null);
+        this.markWorkerDead(workerId, null, null);
         throw new Error('Worker has stopped');
       }
     }
@@ -593,8 +586,17 @@ export class WorkerPool {
         timeout: 10000,
       });
     } catch {
-      // Force kill if graceful shutdown fails
-      state.process?.kill('SIGKILL');
+      // ignore — we tear the worker down below regardless
+    }
+
+    // Tear down the underlying process/pod (idempotent; no-op if already gone).
+    if (state.handle) {
+      try {
+        const launcher = await this.getLauncher();
+        await launcher.stop(state.handle, true);
+      } catch (e) {
+        console.warn(`[WorkerPool] stop worker ${workerId} failed: ${(e as Error).message}`);
+      }
     }
 
     this.workers.delete(workerId);
@@ -617,10 +619,17 @@ export class WorkerPool {
     }
     state.pendingCommands.clear();
 
-    if (typeof state.pid === 'number') {
+    // Force-stop the underlying process/pod via the launcher (async; fire-and-forget so
+    // this stays a synchronous "unstick"). Belt-and-suspenders local SIGKILL by pid too.
+    const handle = state.handle;
+    if (handle) {
+      this.getLauncher()
+        .then((l) => l.stop(handle, true))
+        .catch((e) => console.warn(`[WorkerPool] force-stop ${workerId} failed: ${(e as Error).message}`));
+    }
+    if (handle?.backend !== 'k8s' && typeof state.pid === 'number') {
       try { process.kill(state.pid, 'SIGKILL'); } catch { /* already gone */ }
     }
-    state.process?.kill('SIGKILL');
     this.workers.delete(workerId);
     return true;
   }
@@ -686,7 +695,7 @@ export class WorkerPool {
     const state: WorkerState = {
       id: workerId,
       sessionId,
-      process: null, // adopted — not managed by us
+      handle: null, // adopted — not launched by us this lifetime
       status: 'idle',
       pid,
       startTime: Date.now(),
