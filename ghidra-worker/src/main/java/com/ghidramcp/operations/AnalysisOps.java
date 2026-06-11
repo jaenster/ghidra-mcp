@@ -1931,6 +1931,10 @@ public class AnalysisOps {
      * Accepts both Ghidra API names (local_8, param_1) and decompiler names (iVar1, puVar2).
      */
     public void setFunctionVariableName(String functionAddressStr, String oldName, String newName, String description) throws Exception {
+        setFunctionVariableName(functionAddressStr, oldName, newName, description, false);
+    }
+
+    public void setFunctionVariableName(String functionAddressStr, String oldName, String newName, String description, boolean force) throws Exception {
         Program program = ctx.getProgram();
         DecompInterface decompiler = ctx.getDecompiler();
         TaskMonitor monitor = ctx.getMonitor();
@@ -1941,6 +1945,9 @@ public class AnalysisOps {
         if (func == null) {
             throw new Exception("Function not found at: " + functionAddressStr);
         }
+
+        String entryAddr = func.getEntryPoint().toString();
+        ctx.assertReadBeforeWrite(entryAddr, func.getName(), force);
 
         // Fast path: try direct match against API names (no decompile needed)
         boolean foundDirect = false;
@@ -1961,6 +1968,7 @@ public class AnalysisOps {
                         param.setName(newName, SourceType.USER_DEFINED);
                         ctx.updateFunctionPlateComment(func, description);
                         program.endTransaction(txId, true);
+                        ctx.updateFunctionModCount(entryAddr);
                         return;
                     }
                 }
@@ -1969,6 +1977,7 @@ public class AnalysisOps {
                         var.setName(newName, SourceType.USER_DEFINED);
                         ctx.updateFunctionPlateComment(func, description);
                         program.endTransaction(txId, true);
+                        ctx.updateFunctionModCount(entryAddr);
                         return;
                     }
                 }
@@ -1983,7 +1992,7 @@ public class AnalysisOps {
         HighSymbol highSym = findHighSymbolByName(func, oldName);
         if (highSym == null) {
             throw new Exception("Variable not found: " + oldName +
-                " (searched API names and decompiler names)");
+                ". Available variables: " + buildAvailableVarList(func));
         }
 
         int txId = program.startTransaction("Rename variable (decompiler)");
@@ -1993,6 +2002,7 @@ public class AnalysisOps {
             HighFunctionDBUtil.updateDBVariable(highSym, newName, null, SourceType.USER_DEFINED);
             ctx.updateFunctionPlateComment(func, description);
             program.endTransaction(txId, true);
+            ctx.updateFunctionModCount(entryAddr);
         } catch (Exception e) {
             program.endTransaction(txId, false);
             throw e;
@@ -2004,10 +2014,14 @@ public class AnalysisOps {
      * Accepts both Ghidra API names (local_8, param_1) and decompiler names (iVar1, puVar2).
      */
     public void setFunctionVariableType(String functionAddressStr, String variableName, String dataTypeName, String description) throws Exception {
-        setFunctionVariableType(functionAddressStr, variableName, dataTypeName, description, true);
+        setFunctionVariableType(functionAddressStr, variableName, dataTypeName, description, true, false);
     }
 
     public void setFunctionVariableType(String functionAddressStr, String variableName, String dataTypeName, String description, boolean forceRemoveConflicts) throws Exception {
+        setFunctionVariableType(functionAddressStr, variableName, dataTypeName, description, forceRemoveConflicts, false);
+    }
+
+    public void setFunctionVariableType(String functionAddressStr, String variableName, String dataTypeName, String description, boolean forceRemoveConflicts, boolean forceGuard) throws Exception {
         Program program = ctx.getProgram();
         DecompInterface decompiler = ctx.getDecompiler();
         TaskMonitor monitor = ctx.getMonitor();
@@ -2018,6 +2032,9 @@ public class AnalysisOps {
         if (func == null) {
             throw new Exception("Function not found at: " + functionAddressStr);
         }
+
+        String entryAddr = func.getEntryPoint().toString();
+        ctx.assertReadBeforeWrite(entryAddr, func.getName(), forceGuard);
 
         DataType newType = ctx.resolveDataType(dataTypeName);
 
@@ -2058,6 +2075,7 @@ public class AnalysisOps {
                 targetVar.setDataType(newType, SourceType.USER_DEFINED);
                 ctx.updateFunctionPlateComment(func, description);
                 program.endTransaction(txId, true);
+                ctx.updateFunctionModCount(entryAddr);
                 return;
             } catch (Exception e) {
                 program.endTransaction(txId, false);
@@ -2069,7 +2087,7 @@ public class AnalysisOps {
         HighSymbol highSym = findHighSymbolByName(func, variableName);
         if (highSym == null) {
             throw new Exception("Variable not found: " + variableName +
-                " (searched API names and decompiler names)");
+                ". Available variables: " + buildAvailableVarList(func));
         }
 
         int txId = program.startTransaction("Set variable type (decompiler)");
@@ -2082,6 +2100,7 @@ public class AnalysisOps {
             HighFunctionDBUtil.updateDBVariable(highSym, currentName, newType, SourceType.USER_DEFINED);
             ctx.updateFunctionPlateComment(func, description);
             program.endTransaction(txId, true);
+            ctx.updateFunctionModCount(entryAddr);
         } catch (Exception e) {
             program.endTransaction(txId, false);
             throw e;
@@ -2092,8 +2111,24 @@ public class AnalysisOps {
      * Decompile a function and find a HighSymbol by its decompiler-assigned name.
      * This bridges the gap between decompiler names (iVar1, puVar2) and
      * Ghidra API names (local_8, local_c).
+     *
+     * Lookup order:
+     *  1. Exact name match
+     *  2. Case-insensitive name match
+     *  3. Match against the symbol's storage string (e.g. "Stack[-0x8:4]")
+     *
+     * Returns null on miss; callers should call listAvailableVariableNames() to build
+     * a helpful error message.
      */
     private HighSymbol findHighSymbolByName(Function func, String name) {
+        return findHighSymbolByName(func, name, null);
+    }
+
+    /**
+     * Variant that also returns the full symbol list via an out-list so callers can
+     * build a "variable not found, available: ..." message without decompiling twice.
+     */
+    private HighSymbol findHighSymbolByName(Function func, String name, List<String> availableNamesOut) {
         try {
             DecompileResults results = ctx.getDecompiler().decompileFunction(func, 30, ctx.getMonitor());
             if (results == null || !results.decompileCompleted()) return null;
@@ -2102,17 +2137,58 @@ public class AnalysisOps {
             if (highFunc == null) return null;
 
             LocalSymbolMap symbolMap = highFunc.getLocalSymbolMap();
+
+            HighSymbol exactMatch = null;
+            HighSymbol caseInsensitiveMatch = null;
+            HighSymbol storageMatch = null;
+
+            List<HighSymbol> allSyms = new ArrayList<>();
             Iterator<HighSymbol> symIter = symbolMap.getSymbols();
             while (symIter.hasNext()) {
                 HighSymbol sym = symIter.next();
-                if (sym.getName().equals(name)) {
-                    return sym;
+                allSyms.add(sym);
+
+                if (exactMatch == null && sym.getName().equals(name)) {
+                    exactMatch = sym;
+                }
+                if (caseInsensitiveMatch == null && sym.getName().equalsIgnoreCase(name)) {
+                    caseInsensitiveMatch = sym;
+                }
+                if (storageMatch == null && sym.getStorage() != null
+                        && sym.getStorage().toString().equals(name)) {
+                    storageMatch = sym;
                 }
             }
+
+            if (availableNamesOut != null) {
+                for (HighSymbol sym : allSyms) {
+                    availableNamesOut.add(sym.getName());
+                }
+            }
+
+            if (exactMatch != null) return exactMatch;
+            if (caseInsensitiveMatch != null) return caseInsensitiveMatch;
+            return storageMatch;
         } catch (Exception e) {
             // Decompilation failed — fall through
         }
         return null;
+    }
+
+    /**
+     * Build a string listing available variable names for a function: params, locals, and
+     * decompiler HighSymbol names.  Used in "variable not found" error messages.
+     */
+    private String buildAvailableVarList(Function func) {
+        List<String> names = new ArrayList<>();
+        for (Parameter p : func.getParameters()) names.add(p.getName());
+        for (Variable v : func.getLocalVariables()) names.add(v.getName());
+        List<String> highNames = new ArrayList<>();
+        findHighSymbolByName(func, "__probe__", highNames); // side-effect: fills highNames
+        for (String hn : highNames) {
+            if (!names.contains(hn)) names.add(hn);
+        }
+        return String.join(", ", names);
     }
 
     // =====================================================================

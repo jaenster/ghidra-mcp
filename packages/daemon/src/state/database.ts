@@ -264,6 +264,24 @@ export class StateDatabase {
       )
     `);
 
+    // Sticky sessions: persisted session descriptors for auto-reopen after daemon restart.
+    // Passwords are intentionally NOT stored — they come from env at reopen time.
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS persisted_sessions (
+        session_id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        binary_path TEXT NOT NULL,
+        program_path TEXT,
+        read_only INTEGER NOT NULL DEFAULT 0,
+        auto_analyze INTEGER NOT NULL DEFAULT 0,
+        server_host TEXT,
+        server_port INTEGER,
+        server_repo TEXT,
+        server_user TEXT,
+        created_at TEXT NOT NULL
+      )
+    `);
+
     // OAuth 2.1 authorization-server state (clients via DCR, auth codes, tokens)
     this.db.run(`
       CREATE TABLE IF NOT EXISTS oauth_clients (
@@ -1286,6 +1304,107 @@ export class StateDatabase {
 
     const violations = this.getDependencyRun(row.run_id);
     return { runId: row.run_id, violations, createdAt: new Date(row.created_at) };
+  }
+
+  // =========================================================================
+  // Sticky session descriptor persistence
+  // =========================================================================
+
+  savePersistedSession(descriptor: {
+    sessionId: string;
+    kind: 'server' | 'binary';
+    binaryPath: string;
+    programPath?: string;
+    readOnly?: boolean;
+    autoAnalyze?: boolean;
+    serverHost?: string;
+    serverPort?: number;
+    serverRepo?: string;
+    serverUser?: string;
+  }): void {
+    if (!this.db) throw new Error('Database not initialized');
+    this.db.run(
+      `INSERT OR REPLACE INTO persisted_sessions
+        (session_id, kind, binary_path, program_path, read_only, auto_analyze,
+         server_host, server_port, server_repo, server_user, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        descriptor.sessionId,
+        descriptor.kind,
+        descriptor.binaryPath,
+        descriptor.programPath ?? null,
+        descriptor.readOnly ? 1 : 0,
+        descriptor.autoAnalyze ? 1 : 0,
+        descriptor.serverHost ?? null,
+        descriptor.serverPort ?? null,
+        descriptor.serverRepo ?? null,
+        descriptor.serverUser ?? null,
+        new Date().toISOString(),
+      ]
+    );
+    this.save();
+  }
+
+  deletePersistedSession(sessionId: string): void {
+    if (!this.db) throw new Error('Database not initialized');
+    this.db.run('DELETE FROM persisted_sessions WHERE session_id = ?', [sessionId]);
+    this.save();
+  }
+
+  getPersistedSessions(): Array<{
+    sessionId: string;
+    kind: 'server' | 'binary';
+    binaryPath: string;
+    programPath?: string;
+    readOnly: boolean;
+    autoAnalyze: boolean;
+    serverHost?: string;
+    serverPort?: number;
+    serverRepo?: string;
+    serverUser?: string;
+  }> {
+    if (!this.db) throw new Error('Database not initialized');
+    const stmt = this.db.prepare('SELECT * FROM persisted_sessions ORDER BY created_at');
+    const results: Array<{
+      sessionId: string;
+      kind: 'server' | 'binary';
+      binaryPath: string;
+      programPath?: string;
+      readOnly: boolean;
+      autoAnalyze: boolean;
+      serverHost?: string;
+      serverPort?: number;
+      serverRepo?: string;
+      serverUser?: string;
+    }> = [];
+    while (stmt.step()) {
+      const row = stmt.getAsObject() as {
+        session_id: string;
+        kind: string;
+        binary_path: string;
+        program_path: string | null;
+        read_only: number;
+        auto_analyze: number;
+        server_host: string | null;
+        server_port: number | null;
+        server_repo: string | null;
+        server_user: string | null;
+      };
+      results.push({
+        sessionId: row.session_id,
+        kind: row.kind as 'server' | 'binary',
+        binaryPath: row.binary_path,
+        programPath: row.program_path ?? undefined,
+        readOnly: row.read_only === 1,
+        autoAnalyze: row.auto_analyze === 1,
+        serverHost: row.server_host ?? undefined,
+        serverPort: row.server_port ?? undefined,
+        serverRepo: row.server_repo ?? undefined,
+        serverUser: row.server_user ?? undefined,
+      });
+    }
+    stmt.free();
+    return results;
   }
 
   // =========================================================================

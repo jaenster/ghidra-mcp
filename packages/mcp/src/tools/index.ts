@@ -1233,6 +1233,10 @@ export const modificationTools: ToolDefinition[] = [
         type: 'string',
         description: 'Optional description of what this function does. Updates @description in PLATE comment.',
       },
+      force: {
+        type: 'boolean',
+        description: 'Confirm ("yep sure"): apply even if the function has custom/register parameter storage. Without force=true such a function is REFUSED (a plain prototype string would clear its storage and break the decompile with phantom in_EAX/unaff_ params — use set_custom_signature instead). With force=true it clears the storage and returns a warning.',
+      },
       skipSync: {
         type: 'boolean',
         description: 'Skip cross-binary sync (used internally to prevent loops)',
@@ -1577,6 +1581,10 @@ export const modificationTools: ToolDefinition[] = [
         type: 'boolean',
         description: 'Mark function as having variable arguments',
       },
+      force: {
+        type: 'boolean',
+        description: 'Confirm a destructive change ("yep sure"). Required when setting a standard calling convention on a function that has custom/register parameter storage: without force=true the call is REFUSED with an explanatory error (it would clear that storage and re-derive it). With force=true it proceeds and returns a warning describing what was cleared.',
+      },
     }
   ),
 
@@ -1711,6 +1719,23 @@ export const modificationTools: ToolDefinition[] = [
       },
     },
     ['oldName', 'newName']
+  ),
+
+  defineTool(
+    'delete_namespace',
+    'Delete a namespace. Useful for removing the empty namespace shell left after moving all symbols out (which otherwise emits an empty file in reconstructions). Refuses if the namespace still contains symbols unless force=true.',
+    {
+      ...sessionIdProp,
+      name: {
+        type: 'string',
+        description: 'Namespace name to delete',
+      },
+      force: {
+        type: 'boolean',
+        description: 'Confirm ("yep sure"): delete even if the namespace still contains symbols (removes them). Without force=true, a non-empty namespace is refused with an explanatory error.',
+      },
+    },
+    ['name']
   ),
 
   // Undo/redo

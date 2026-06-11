@@ -10,7 +10,9 @@ import ghidra.util.task.ConsoleTaskMonitor;
 import ghidra.util.task.TaskMonitor;
 
 import java.util.ArrayList;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.*;
 
 /**
@@ -28,22 +30,29 @@ public class DecompilerPool {
     private final List<DecompInterface> allInstances;
     private final int poolSize;
     private final Logger log;
+    private final Program program;
+    /** Last program modification number seen by each pooled DecompInterface instance. */
+    private final Map<DecompInterface, Long> lastModNumber;
     private volatile boolean shutdown = false;
 
     public DecompilerPool(Program program, int poolSize, Logger log) {
         this.poolSize = poolSize;
         this.log = log;
+        this.program = program;
         this.available = new ArrayBlockingQueue<>(poolSize);
         this.allInstances = new ArrayList<>(poolSize);
+        this.lastModNumber = new IdentityHashMap<>(poolSize);
         this.executor = Executors.newFixedThreadPool(poolSize, r -> {
             Thread t = new Thread(r, "decompiler-pool");
             t.setDaemon(true);
             return t;
         });
 
+        long initialMod = program.getModificationNumber();
         for (int i = 0; i < poolSize; i++) {
             DecompInterface decomp = createDecompiler(program);
             allInstances.add(decomp);
+            lastModNumber.put(decomp, initialMod);
             available.add(decomp);
         }
 
@@ -83,7 +92,14 @@ public class DecompilerPool {
     }
 
     private DecompInterface borrow() throws InterruptedException {
-        return available.take();
+        DecompInterface decomp = available.take();
+        long currentMod = program.getModificationNumber();
+        Long seen = lastModNumber.get(decomp);
+        if (seen == null || seen != currentMod) {
+            decomp.flushCache();
+            lastModNumber.put(decomp, currentMod);
+        }
+        return decomp;
     }
 
     private void returnInstance(DecompInterface decomp) {

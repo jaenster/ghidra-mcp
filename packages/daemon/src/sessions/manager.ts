@@ -53,7 +53,7 @@ export class SessionManager {
   async init(): Promise<void> {
     if (this.initialized) return;
     await this.database.ready();
-    this.restoreSessions();
+    this.clearStaleSessions();
     this.initialized = true;
   }
 
@@ -61,10 +61,157 @@ export class SessionManager {
    * Clear stale sessions from database on startup
    * Sessions without running workers are useless, so we start fresh
    */
-  private restoreSessions(): void {
+  private clearStaleSessions(): void {
     const savedSessions = this.database.getSessions();
     for (const session of savedSessions) {
       this.database.deleteSession(session.id);
+    }
+  }
+
+  /**
+   * Reopen all persisted sessions after a daemon restart.
+   * Called after init() in daemon.ts — non-fatal per session.
+   * For ghidra-server sessions, retries with exponential backoff (up to ~2 min)
+   * so a pod restart where the Ghidra server is also starting doesn't lose the session.
+   */
+  async reopenPersistedSessions(): Promise<void> {
+    const descriptors = this.database.getPersistedSessions();
+    if (descriptors.length === 0) return;
+
+    console.log(`[SessionManager] Reopening ${descriptors.length} persisted session(s)`);
+
+    for (const desc of descriptors) {
+      // Skip if already adopted via worker reconnect (worker survived the restart)
+      if (this.sessions.has(desc.sessionId)) {
+        console.log(`[SessionManager] Session ${desc.sessionId} already exists (worker reconnected), skipping`);
+        continue;
+      }
+
+      console.log(`[SessionManager] Reopening persisted session ${desc.sessionId} (${desc.kind}: ${desc.binaryPath})`);
+
+      const maxAttempts = desc.kind === 'server' ? 8 : 3;
+      let lastError: unknown;
+
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+          if (attempt > 1) {
+            const delayMs = Math.min(1000 * 2 ** (attempt - 2), 30_000); // 1s, 2s, 4s, 8s … 30s cap
+            console.log(`[SessionManager] Retry ${attempt}/${maxAttempts} for ${desc.sessionId} in ${delayMs}ms`);
+            await new Promise((r) => setTimeout(r, delayMs));
+          }
+
+          // Skip if adopted while we were waiting
+          if (this.sessions.has(desc.sessionId)) {
+            console.log(`[SessionManager] Session ${desc.sessionId} adopted by worker during retry, skipping`);
+            break;
+          }
+
+          await this.reopenOne(desc);
+          console.log(`[SessionManager] Session ${desc.sessionId} reopened successfully`);
+          lastError = undefined;
+          break;
+        } catch (err) {
+          lastError = err;
+          console.warn(`[SessionManager] Failed to reopen session ${desc.sessionId} (attempt ${attempt}/${maxAttempts}): ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+
+      if (lastError !== undefined) {
+        console.error(`[SessionManager] Giving up on session ${desc.sessionId}: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
+        // Remove the persisted entry so it doesn't keep failing on every restart
+        this.database.deletePersistedSession(desc.sessionId);
+      }
+    }
+  }
+
+  private async reopenOne(desc: ReturnType<StateDatabase['getPersistedSessions']>[number]): Promise<void> {
+    if (desc.kind === 'server') {
+      const serverPassword = process.env.GHIDRA_SERVER_PASSWORD;
+      const projectPath = path.join(getProjectsDir(), desc.sessionId);
+      const ghidraServer = {
+        host: desc.serverHost!,
+        port: desc.serverPort!,
+        repo: desc.serverRepo!,
+        programPath: desc.programPath ?? '/',
+        serverUser: desc.serverUser ?? process.env.GHIDRA_SERVER_USER ?? 'mcp',
+        serverPassword,
+      };
+
+      const state: SessionState = {
+        binaryPath: desc.binaryPath,
+        binaryHash: crypto.createHash('sha256').update(desc.binaryPath).digest('hex'),
+        createdAt: new Date(),
+        lastAccessedAt: new Date(),
+        status: 'starting',
+        clientCount: 0,
+        projectPath,
+        programPath: desc.programPath,
+        ghidraServer,
+      };
+      this.sessions.set(desc.sessionId, state);
+      // Re-register in the sessions table so alias resolution still works
+      this.database.saveSession(desc.sessionId, state);
+
+      try {
+        const workerId = await this.workerPool.spawnWorker(desc.sessionId, {
+          binaryPath: desc.binaryPath,
+          projectPath,
+          programPath: desc.programPath,
+          autoAnalyze: false,
+          readOnly: desc.readOnly,
+          ghidraServer,
+        });
+        state.workerId = workerId;
+        state.status = 'analyzing';
+        await this.workerPool.waitForReady(workerId);
+        state.status = 'ready';
+      } catch (err) {
+        state.status = 'error';
+        state.error = err instanceof Error ? err.message : String(err);
+        this.sessions.delete(desc.sessionId);
+        this.database.deleteSession(desc.sessionId);
+        throw err;
+      }
+    } else {
+      // Binary session
+      if (!fs.existsSync(desc.binaryPath)) {
+        throw new Error(`Binary no longer exists: ${desc.binaryPath}`);
+      }
+      const binaryHash = await this.computeFileHash(desc.binaryPath);
+      const projectPath = path.join(getProjectsDir(), desc.sessionId);
+
+      const state: SessionState = {
+        binaryPath: desc.binaryPath,
+        binaryHash,
+        createdAt: new Date(),
+        lastAccessedAt: new Date(),
+        status: 'starting',
+        clientCount: 0,
+        projectPath,
+        programPath: desc.programPath,
+      };
+      this.sessions.set(desc.sessionId, state);
+      this.database.saveSession(desc.sessionId, state);
+
+      try {
+        const workerId = await this.workerPool.spawnWorker(desc.sessionId, {
+          binaryPath: desc.binaryPath,
+          projectPath,
+          programPath: desc.programPath,
+          autoAnalyze: false, // don't re-analyze on reopen
+          readOnly: desc.readOnly,
+        });
+        state.workerId = workerId;
+        state.status = 'analyzing';
+        await this.workerPool.waitForReady(workerId);
+        state.status = 'ready';
+      } catch (err) {
+        state.status = 'error';
+        state.error = err instanceof Error ? err.message : String(err);
+        this.sessions.delete(desc.sessionId);
+        this.database.deleteSession(desc.sessionId);
+        throw err;
+      }
     }
   }
 
@@ -75,14 +222,37 @@ export class SessionManager {
     binaryPath: string,
     options?: SessionCreateOptions
   ): Promise<Session> {
-    // Ghidra Server (shared repository) session: binaryPath is a ghidra:// URL
-    // or a bare "repo/program/path" that gets auto-prefixed with the configured server.
-    if (binaryPath.startsWith('ghidra://')) {
-      return this.createServerSession(binaryPath, options);
-    }
+    // Ghidra Server (shared repository) session. binaryPath may be:
+    //   1. host-qualified URL:  ghidra://HOST[:PORT]/REPO/program/path
+    //   2. scheme + repo path:  ghidra://REPO/program/path            (no host)
+    //   3. bare repo path:      REPO/program/path                     (no scheme)
+    // Forms 2 & 3 are resolved against GHIDRA_SERVER_HOST/PORT so clients never need
+    // to type the server host — the daemon owns the server identity via env vars
+    // (GHIDRA_SERVER_HOST/PORT/USER/PASSWORD). Credentials always come from env, never the URL.
     const defaultHost = process.env.GHIDRA_SERVER_HOST;
-    if (defaultHost && !binaryPath.startsWith('/') && !binaryPath.match(/^[A-Za-z]:[/\\]/) && !binaryPath.endsWith('.gpr') && !binaryPath.startsWith('.')) {
-      const port = process.env.GHIDRA_SERVER_PORT ?? '13100';
+    const port = process.env.GHIDRA_SERVER_PORT ?? '13100';
+    const looksLocal = binaryPath.startsWith('/') || /^[A-Za-z]:[/\\]/.test(binaryPath)
+      || binaryPath.endsWith('.gpr') || binaryPath.startsWith('.');
+
+    if (binaryPath.startsWith('ghidra://')) {
+      const afterScheme = binaryPath.slice('ghidra://'.length);
+      const firstSeg = afterScheme.split('/')[0];
+      // A real host segment carries a port (':'), a dotted FQDN/IP ('.'), credentials
+      // ('@'), or is 'localhost'. Otherwise the first segment is a REPO name and the
+      // URL is host-less → resolve against the configured default server.
+      const hostQualified = firstSeg.includes(':') || firstSeg.includes('.')
+        || firstSeg.includes('@') || firstSeg === 'localhost';
+      if (hostQualified) {
+        return this.createServerSession(binaryPath, options);
+      }
+      if (!defaultHost) {
+        throw new Error('Host-less ghidra:// path but no GHIDRA_SERVER_HOST configured — '
+          + 'set GHIDRA_SERVER_HOST or pass a full ghidra://host:port/repo/... URL.');
+      }
+      return this.createServerSession(`ghidra://${defaultHost}:${port}/${afterScheme}`, options);
+    }
+
+    if (defaultHost && !looksLocal) {
       return this.createServerSession(`ghidra://${defaultHost}:${port}/${binaryPath}`, options);
     }
 
@@ -147,6 +317,14 @@ export class SessionManager {
 
     this.sessions.set(sessionId, state);
     this.database.saveSession(sessionId, state);
+    this.database.savePersistedSession({
+      sessionId,
+      kind: 'binary',
+      binaryPath: resolvedPath,
+      programPath,
+      readOnly: options?.readOnly,
+      autoAnalyze: options?.autoAnalyze ?? true,
+    });
 
     try {
       if (existingWorkerId) {
@@ -202,8 +380,11 @@ export class SessionManager {
     options?: SessionCreateOptions
   ): Promise<Session> {
     const parsed = parseGhidraServerUrl(url);
-    const serverUser = parsed.user ?? process.env.GHIDRA_SERVER_USER ?? 'mcp';
-    const serverPassword = parsed.password ?? process.env.GHIDRA_SERVER_PASSWORD;
+    // Credentials come from the daemon's env (the server identity is owned by the
+    // daemon, not the client). URL-embedded user:password is only a last-resort
+    // fallback for ad-hoc connections to a different server.
+    const serverUser = process.env.GHIDRA_SERVER_USER ?? parsed.user ?? 'mcp';
+    const serverPassword = process.env.GHIDRA_SERVER_PASSWORD ?? parsed.password;
     const ghidraServer: GhidraServerInfo = {
       host: parsed.host,
       port: parsed.port,
@@ -271,6 +452,17 @@ export class SessionManager {
 
     this.sessions.set(sessionId, state);
     this.database.saveSession(sessionId, state);
+    this.database.savePersistedSession({
+      sessionId,
+      kind: 'server',
+      binaryPath: canonicalUrl,
+      programPath,
+      readOnly: options?.readOnly,
+      serverHost: ghidraServer.host,
+      serverPort: ghidraServer.port,
+      serverRepo: ghidraServer.repo,
+      serverUser: ghidraServer.serverUser,
+    });
 
     try {
       if (existingWorkerId) {
@@ -382,6 +574,7 @@ export class SessionManager {
       // Remove session and its aliases
       this.sessions.delete(sessionId);
       this.database.deleteSession(sessionId);
+      this.database.deletePersistedSession(sessionId);
       this.database.removeAliasesForSession(sessionId);
     }
   }

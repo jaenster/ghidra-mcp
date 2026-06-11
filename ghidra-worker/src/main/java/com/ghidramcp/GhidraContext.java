@@ -50,6 +50,16 @@ public class GhidraContext {
     private static boolean jythonInitialized = false;
     private long cacheVersion = 0;
 
+    // Read-before-write guard: function entryAddress → program modCount at read time.
+    // Only populated by recordFunctionRead(); checked by assertReadBeforeWrite().
+    private final Map<String, Long> functionReadMap = new HashMap<>();
+
+    // Read-before-write guard is OPT-IN: enable with GHIDRA_MCP_READ_GUARD=1.
+    // OFF by default so existing automation (cross-binary sync, VT markup, batch
+    // mutations) that writes without a decompile-first in this session is not broken.
+    private static final boolean GUARD_ENABLED =
+        "1".equals(System.getenv("GHIDRA_MCP_READ_GUARD"));
+
     // Multi-program state: path → (Program, FlatProgramAPI, DecompInterface)
     private final Map<String, Program> programs = new LinkedHashMap<>();
     private final Map<String, DecompInterface> decompilers = new HashMap<>();
@@ -477,6 +487,56 @@ public class GhidraContext {
             }
         }
         return tags;
+    }
+
+    // ============== Read-before-write guard ==============
+
+    /**
+     * Record that the caller has read the function at entryAddr at the current program modCount.
+     * Call this after a successful decompile() or getFunctionInfo().
+     */
+    public void recordFunctionRead(String entryAddr, long modCount) {
+        if (entryAddr == null) return;
+        functionReadMap.put(entryAddr, modCount);
+    }
+
+    /**
+     * Assert that the function was read recently and the program has not changed since.
+     * Throws a clear, actionable error if the guard fires.
+     *
+     * @param entryAddr  hex entry-point string of the function (null → skip silently)
+     * @param funcName   human-readable name for the error message
+     * @param force      if true, skip the check (caller opt-out)
+     */
+    public void assertReadBeforeWrite(String entryAddr, String funcName, boolean force) throws Exception {
+        if (!GUARD_ENABLED) return;
+        if (force) return;
+        if (entryAddr == null || program == null) return;
+
+        Long recorded = functionReadMap.get(entryAddr);
+        if (recorded == null) {
+            throw new Exception(
+                "Read-before-write: read " + funcName + " first (decompile or get_function_info) " +
+                "before modifying it. Pass force=true to bypass.");
+        }
+
+        long current = program.getModificationNumber();
+        if (current != recorded) {
+            throw new Exception(
+                "Stale read: " + funcName + " changed since you read it (modCount " + recorded +
+                " → " + current + ") — re-decompile or call get_function_info, then retry. " +
+                "Pass force=true to bypass.");
+        }
+    }
+
+    /**
+     * Update the recorded modCount for a function after a successful write.
+     * This allows consecutive writes on the same function without requiring a re-read.
+     */
+    public void updateFunctionModCount(String entryAddr) {
+        if (entryAddr == null || program == null) return;
+        if (!functionReadMap.containsKey(entryAddr)) return;
+        functionReadMap.put(entryAddr, program.getModificationNumber());
     }
 
     // ============== Transaction cleanup ==============

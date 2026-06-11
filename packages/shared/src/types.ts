@@ -74,6 +74,22 @@ export interface FunctionInfo {
   tags?: SymbolTag[];
 }
 
+/** Lightweight function entry (no params/locals/comment) — for find/list results. */
+export interface FunctionListEntry {
+  name: string;
+  address: string;
+  signature: string;
+  returnType: string;
+  callingConvention: string;
+  parameterCount: number;
+  size: number;
+  isThunk: boolean;
+  isExternal: boolean;
+  hasVarArgs: boolean;
+  namespace?: string;
+  tags?: SymbolTag[];
+}
+
 export interface FunctionSummary {
   name: string;
   address: string;

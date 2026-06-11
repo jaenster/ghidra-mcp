@@ -83,6 +83,11 @@ export async function startDaemon(options?: {
   const sessionManager = new SessionManager(database, workerPool);
   await sessionManager.init();
 
+  // Reopen previously-open sessions (non-blocking — failures are logged, not thrown)
+  sessionManager.reopenPersistedSessions().catch((err) => {
+    logger.error('Error during session reopen', { error: String(err) });
+  });
+
   logger.info('Components initialized');
 
   // Create command log for dashboard

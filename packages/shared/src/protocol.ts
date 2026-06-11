@@ -10,6 +10,7 @@
 import type {
   ProgramInfo,
   FunctionInfo,
+  FunctionListEntry,
   FunctionSummary,
   DecompileResult,
   DisassemblyResult,
@@ -116,6 +117,7 @@ export type WorkerCommand =
   | CreateNamespaceCommand
   | MoveSymbolToNamespaceCommand
   | RenameNamespaceCommand
+  | DeleteNamespaceCommand
   // Undo/redo commands
   | UndoCommand
   | RedoCommand
@@ -504,6 +506,8 @@ export interface SetPrototypeCommand extends BaseCommand {
     functionAddress: string;
     prototype: string;
     description?: string;
+    /** Confirm applying the prototype even when it would clear custom/register storage. */
+    force?: boolean;
   };
 }
 
@@ -635,6 +639,8 @@ export interface SetFunctionAttributesCommand extends BaseCommand {
     noReturn?: boolean;
     inline?: boolean;
     varArgs?: boolean;
+    /** Confirm a destructive change (clearing custom/register storage when setting a convention). */
+    force?: boolean;
   };
 }
 
@@ -680,6 +686,15 @@ export interface RenameNamespaceCommand extends BaseCommand {
   params: {
     oldName: string;
     newName: string;
+  };
+}
+
+export interface DeleteNamespaceCommand extends BaseCommand {
+  command: 'delete_namespace';
+  params: {
+    name: string;
+    /** Confirm deletion when the namespace still contains symbols. */
+    force?: boolean;
   };
 }
 
@@ -1074,13 +1089,13 @@ export type CommandResultMap = {
   'rename_symbol': { success: boolean; oldName?: string; newName?: string };
   'set_comment': { success: boolean };
   'set_data_type': { success: boolean };
-  'set_prototype': { success: boolean };
+  'set_prototype': { success: boolean; warnings?: string[] };
   'set_custom_signature': { success: boolean };
   'create_structure': { success: boolean; dataType?: DataTypeInfo };
   'batch_rename': BatchResult;
   'execute_script': ScriptResult;
   'get_analysis_hints': { hints: AnalysisHint[] };
-  'find_functions_matching': { functions: FunctionInfo[] };
+  'find_functions_matching': { functions: FunctionListEntry[] };
   'trace_data_flow': { flow: DataFlowNode[] };
   'save': { success: boolean };
   'checkin': { success: boolean; message: string };
@@ -1089,13 +1104,14 @@ export type CommandResultMap = {
   'set_equate': { success: boolean };
   'delete_equate': { success: boolean };
   // Function attributes/tags
-  'set_function_attributes': { name: string; address: string; callingConvention: string; noReturn: boolean; inline: boolean; varArgs: boolean };
+  'set_function_attributes': { name: string; address: string; callingConvention: string; noReturn: boolean; inline: boolean; varArgs: boolean; warnings?: string[] };
   'add_function_tag': { tags: string[] };
   'remove_function_tag': { tags: string[] };
   // Namespace
   'create_namespace': { name: string; parentNamespace: string; isClass: boolean };
   'move_symbol_to_namespace': { name: string; oldNamespace: string; newNamespace: string };
   'rename_namespace': { oldName: string; newName: string };
+  'delete_namespace': { name: string; symbolsRemoved: number; warnings?: string[] };
   // Undo/redo
   'undo': { undone: string; canUndo: boolean; canRedo: boolean };
   'redo': { redone: string; canUndo: boolean; canRedo: boolean };

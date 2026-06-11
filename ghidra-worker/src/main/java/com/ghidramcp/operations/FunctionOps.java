@@ -7,6 +7,9 @@ import com.google.gson.JsonObject;
 
 import ghidra.app.decompiler.DecompileResults;
 import ghidra.program.database.sourcemap.SourceFile;
+import ghidra.program.model.pcode.HighFunction;
+import ghidra.program.model.pcode.HighSymbol;
+import ghidra.program.model.pcode.LocalSymbolMap;
 import ghidra.program.model.address.Address;
 import ghidra.program.model.block.BasicBlockModel;
 import ghidra.program.model.block.CodeBlock;
@@ -89,17 +92,33 @@ public class FunctionOps {
      * Get function by address or name
      */
     public Function getFunction(String address, String name) {
+        var fm = ctx.getProgram().getFunctionManager();
         if (address != null) {
             Address addr = ctx.parseAddress(address);
-            return ctx.getProgram().getFunctionManager().getFunctionAt(addr);
+            Function f = fm.getFunctionAt(addr);
+            if (f == null) {
+                // Resolve a mid-function address to its containing function's entry,
+                // so decompile/get_function_info work for any address inside a function.
+                f = fm.getFunctionContaining(addr);
+            }
+            return f;
         } else if (name != null) {
-            Iterator<Function> iter = ctx.getProgram().getFunctionManager().getFunctions(true);
+            // Accept either the simple name ("FN") or the fully-namespaced form
+            // ("Storm::Source::SFile::FN") that list_symbols / list_functions emit.
+            // An exact namespaced match wins (also disambiguates duplicate simple
+            // names across namespaces); otherwise fall back to the first simple match.
+            Function simpleMatch = null;
+            Iterator<Function> iter = fm.getFunctions(true);
             while (iter.hasNext()) {
                 Function func = iter.next();
-                if (func.getName().equals(name)) {
+                if (func.getName(true).equals(name)) {
                     return func;
                 }
+                if (simpleMatch == null && func.getName().equals(name)) {
+                    simpleMatch = func;
+                }
             }
+            return simpleMatch;
         }
         return null;
     }
@@ -180,6 +199,52 @@ public class FunctionOps {
             info.localVariables.add(vinfo);
         }
 
+        // PAINPOINT #31: enrich undefined* types with the decompiler-resolved type.
+        // Build a name→resolvedType map from the HighFunction; only run if any
+        // local/param has an undefined* raw type (avoids needless decompile cost).
+        boolean hasUndefined = false;
+        for (GhidraEngine.VariableInfo v : info.localVariables)
+            if (v.dataType != null && v.dataType.startsWith("undefined")) { hasUndefined = true; break; }
+        if (!hasUndefined) {
+            for (GhidraEngine.ParameterInfo p : info.parameters)
+                if (p.dataType != null && p.dataType.startsWith("undefined")) { hasUndefined = true; break; }
+        }
+        if (hasUndefined) {
+            try {
+                DecompileResults dr = ctx.getDecompiler().decompileFunction(func, 30, ctx.getMonitor());
+                if (dr != null && dr.decompileCompleted()) {
+                    HighFunction hf = dr.getHighFunction();
+                    if (hf != null) {
+                        Map<String, String> resolvedByName = new HashMap<>();
+                        LocalSymbolMap lsm = hf.getLocalSymbolMap();
+                        Iterator<HighSymbol> sit = lsm.getSymbols();
+                        while (sit.hasNext()) {
+                            HighSymbol hs = sit.next();
+                            String dt = hs.getDataType() != null ? hs.getDataType().getName() : null;
+                            if (dt != null && !dt.startsWith("undefined"))
+                                resolvedByName.put(hs.getName(), dt);
+                        }
+                        for (GhidraEngine.VariableInfo v : info.localVariables) {
+                            if (v.dataType != null && v.dataType.startsWith("undefined")) {
+                                String resolved = resolvedByName.get(v.name);
+                                if (resolved != null)
+                                    v.dataType = v.dataType + " /* resolvedType: " + resolved + " */";
+                            }
+                        }
+                        for (GhidraEngine.ParameterInfo p : info.parameters) {
+                            if (p.dataType != null && p.dataType.startsWith("undefined")) {
+                                String resolved = resolvedByName.get(p.name);
+                                if (resolved != null)
+                                    p.dataType = p.dataType + " /* resolvedType: " + resolved + " */";
+                            }
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                // best-effort; raw type remains unchanged on error
+            }
+        }
+
         // Get comment
         info.comment = func.getComment();
 
@@ -245,6 +310,9 @@ public class FunctionOps {
             info.tags = parsedTags;
         }
 
+        // Record the read so write operations can check freshness
+        ctx.recordFunctionRead(func.getEntryPoint().toString(), ctx.getProgram().getModificationNumber());
+
         return info;
     }
 
@@ -268,7 +336,10 @@ public class FunctionOps {
             results = ctx.getDecompiler().decompileFunction(func, timeout, ctx.getMonitor());
         }
 
-        return buildDecompileResult(func, results);
+        GhidraEngine.DecompileResult dr = buildDecompileResult(func, results);
+        // Record the read so write operations can check freshness
+        ctx.recordFunctionRead(func.getEntryPoint().toString(), ctx.getProgram().getModificationNumber());
+        return dr;
     }
 
     /**
@@ -724,10 +795,13 @@ public class FunctionOps {
     /**
      * Find functions that match compound criteria
      */
-    public List<GhidraEngine.FunctionInfo> findFunctionsMatching(List<String> calls, List<String> notCalls,
+    public List<GhidraEngine.FunctionListEntry> findFunctionsMatching(List<String> calls, List<String> notCalls,
                                                                  String referencesString, String inNamespace,
                                                                  int sizeMin, int sizeMax, int limit) {
-        List<GhidraEngine.FunctionInfo> matches = new ArrayList<>();
+        // Lightweight entries (name/address/signature/size) — NOT full FunctionInfo: a
+        // broad match set with full params+locals (and, since #31, a decompile each) blows
+        // the token limit and is slow. Callers get_function_info the few they want.
+        List<GhidraEngine.FunctionListEntry> matches = new ArrayList<>();
         FunctionManager funcMgr = ctx.getProgram().getFunctionManager();
         ReferenceManager refMgr = ctx.getProgram().getReferenceManager();
 
@@ -804,7 +878,7 @@ public class FunctionOps {
                 if (!foundString) continue;
             }
 
-            matches.add(this.getFunctionInfo(func));
+            matches.add(this.getFunctionListEntry(func));
         }
 
         return matches;

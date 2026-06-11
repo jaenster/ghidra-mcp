@@ -90,7 +90,13 @@ export class WorkerPool {
   private stalenessTimer: NodeJS.Timeout;
 
   constructor(options: WorkerPoolOptions = {}) {
-    this.maxWorkers = options.maxWorkers ?? 10;
+    // Each worker is its own Ghidra JVM at -Xmx${GHIDRA_MCP_MEMORY}. The pool MUST
+    // be capped so (maxWorkers × workerHeap + nodeOverhead) fits the container's
+    // memory limit, otherwise concurrent sessions OOMKill the pod. Make it
+    // config-driven (GHIDRA_MCP_MAX_WORKERS) instead of a fixed 10 that can never
+    // fit a small pod. Default conservative.
+    const envMax = parseInt(process.env.GHIDRA_MCP_MAX_WORKERS ?? '', 10);
+    this.maxWorkers = options.maxWorkers ?? (Number.isFinite(envMax) && envMax > 0 ? envMax : 4);
     if (options.logStore) {
       this.log = createLogger(options.logStore, 'WorkerPool');
     }

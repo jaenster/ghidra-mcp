@@ -20,14 +20,14 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 # Ghidra — needed at build time to compile the worker against its API jars,
-# and at runtime for the worker classpath. Keep in sync with the version the
-# worker source targets (12.1).
+# and at runtime for the worker classpath. MUST match the Ghidra Server version
+# (ghcr.io/jaenster/ghidra-server) — the RMI client/server handshake is version-checked.
 ENV GHIDRA_HOME=/opt/ghidra
 RUN curl -fsSL -o /tmp/ghidra.zip \
-      https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1_build/ghidra_12.1_PUBLIC_20260513.zip \
+      https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_12.1.2_build/ghidra_12.1.2_PUBLIC_20260605.zip \
  && unzip -q /tmp/ghidra.zip -d /opt \
  && rm /tmp/ghidra.zip \
- && mv /opt/ghidra_12.1_PUBLIC /opt/ghidra
+ && mv /opt/ghidra_12.1.2_PUBLIC /opt/ghidra
 
 WORKDIR /app
 COPY . .

@@ -269,6 +269,9 @@ public class CommandHandler {
             case "rename_namespace":
                 return handleRenameNamespace(params);
 
+            case "delete_namespace":
+                return handleDeleteNamespace(params);
+
             // Undo/redo
             case "undo":
                 return handleUndo();
@@ -998,16 +1001,21 @@ public class CommandHandler {
         String functionAddress = getString(params, "functionAddress", null);
         String prototype = getString(params, "prototype", null);
         String description = getString(params, "description", null);
+        boolean force = params.has("force") && !params.get("force").isJsonNull()
+            && params.get("force").getAsBoolean();
 
         if (functionAddress == null || prototype == null) {
             throw new IllegalArgumentException("functionAddress and prototype are required");
         }
 
-        engine.setPrototype(functionAddress, prototype, description);
+        java.util.List<String> warnings = engine.setPrototype(functionAddress, prototype, description, force);
         engine.invalidateCache();
 
         JsonObject result = new JsonObject();
         result.addProperty("success", true);
+        if (warnings != null && !warnings.isEmpty()) {
+            result.add("warnings", gson.toJsonTree(warnings));
+        }
         return result;
     }
 
@@ -1015,6 +1023,8 @@ public class CommandHandler {
         String functionAddress = getString(params, "functionAddress", null);
         String returnType = getString(params, "returnType", "void");
         String description = getString(params, "description", null);
+        boolean force = params.has("force") && !params.get("force").isJsonNull()
+            && params.get("force").getAsBoolean();
         JsonArray parametersArray = params.has("parameters") ? params.getAsJsonArray("parameters") : new JsonArray();
 
         if (functionAddress == null) {
@@ -1034,7 +1044,7 @@ public class CommandHandler {
             parameters.add(param);
         }
 
-        engine.setCustomSignature(functionAddress, returnType, parameters, description);
+        engine.setCustomSignature(functionAddress, returnType, parameters, description, force);
         engine.invalidateCache();
 
         JsonObject result = new JsonObject();
@@ -1089,7 +1099,7 @@ public class CommandHandler {
             }
         }
 
-        List<GhidraEngine.FunctionInfo> functions = engine.findFunctionsMatching(calls, notCalls, referencesString, inNamespace, sizeMin, sizeMax, limit);
+        List<GhidraEngine.FunctionListEntry> functions = engine.findFunctionsMatching(calls, notCalls, referencesString, inNamespace, sizeMin, sizeMax, limit);
 
         JsonObject result = new JsonObject();
         result.add("functions", gson.toJsonTree(functions));
@@ -1495,12 +1505,14 @@ public class CommandHandler {
         String oldName = getString(params, "oldName", null);
         String newName = getString(params, "newName", null);
         String description = getString(params, "description", null);
+        boolean force = params.has("force") && !params.get("force").isJsonNull()
+            && params.get("force").getAsBoolean();
 
         if (functionAddress == null || oldName == null || newName == null) {
             throw new IllegalArgumentException("functionAddress, oldName, and newName are required");
         }
 
-        engine.setFunctionVariableName(functionAddress, oldName, newName, description);
+        engine.setFunctionVariableName(functionAddress, oldName, newName, description, force);
         engine.invalidateCache();
 
         JsonObject result = new JsonObject();
@@ -1513,13 +1525,17 @@ public class CommandHandler {
         String variableName = getString(params, "variableName", null);
         String dataType = getString(params, "dataType", null);
         String description = getString(params, "description", null);
-        boolean force = !params.has("force") || params.get("force").isJsonNull() || params.get("force").getAsBoolean();
+        // forceRemoveConflicts: default true (existing behaviour — remove overlapping stack vars)
+        boolean forceRemoveConflicts = !params.has("force") || params.get("force").isJsonNull() || params.get("force").getAsBoolean();
+        // forceGuard: explicit read-guard bypass, defaults false
+        boolean forceGuard = params.has("force") && !params.get("force").isJsonNull()
+            && params.get("force").getAsBoolean();
 
         if (functionAddress == null || variableName == null || dataType == null) {
             throw new IllegalArgumentException("functionAddress, variableName, and dataType are required");
         }
 
-        engine.setFunctionVariableType(functionAddress, variableName, dataType, description, force);
+        engine.setFunctionVariableType(functionAddress, variableName, dataType, description, forceRemoveConflicts, forceGuard);
         engine.invalidateCache();
 
         JsonObject result = new JsonObject();
@@ -1657,9 +1673,11 @@ public class CommandHandler {
             ? params.get("inline").getAsBoolean() : null;
         Boolean varArgs = params.has("varArgs") && !params.get("varArgs").isJsonNull()
             ? params.get("varArgs").getAsBoolean() : null;
+        boolean force = params.has("force") && !params.get("force").isJsonNull()
+            && params.get("force").getAsBoolean();
 
         GhidraEngine.FunctionAttributesResult result = engine.setFunctionAttributes(
-            address, name, callingConvention, noReturn, inline, varArgs);
+            address, name, callingConvention, noReturn, inline, varArgs, force);
         engine.invalidateCache();
 
         return gson.toJsonTree(result).getAsJsonObject();
@@ -1759,6 +1777,20 @@ public class CommandHandler {
         result.addProperty("oldName", oldName);
         result.addProperty("newName", newName);
         return result;
+    }
+
+    private JsonObject handleDeleteNamespace(JsonObject params) throws Exception {
+        String name = getString(params, "name", null);
+        if (name == null) {
+            throw new IllegalArgumentException("name is required");
+        }
+        boolean force = params.has("force") && !params.get("force").isJsonNull()
+            && params.get("force").getAsBoolean();
+
+        GhidraEngine.DeleteNamespaceResult result = engine.deleteNamespace(name, force);
+        engine.invalidateCache();
+
+        return gson.toJsonTree(result).getAsJsonObject();
     }
 
     // ==================== UNDO/REDO ====================

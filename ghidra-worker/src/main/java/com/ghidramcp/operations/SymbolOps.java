@@ -468,6 +468,56 @@ public class SymbolOps {
     }
 
     /**
+     * Delete a namespace. By default refuses if it still contains symbols (deleting a
+     * populated namespace would remove them); pass force=true to delete it anyway.
+     * Primary use: removing the empty namespace shell left after moving all symbols out
+     * (otherwise the reconstructor emits an empty .cpp for it).
+     */
+    public GhidraEngine.DeleteNamespaceResult deleteNamespace(String name, boolean force) throws Exception {
+        Program program = ctx.getProgram();
+        SymbolTable symbolTable = program.getSymbolTable();
+        Namespace ns = symbolTable.getNamespace(name, null);
+        if (ns == null) {
+            throw new Exception("Namespace not found: " + name);
+        }
+
+        int childCount = 0;
+        for (Symbol ignored : symbolTable.getSymbols(ns)) {
+            childCount++;
+        }
+
+        // Tricky/destructive guard (checked before mutating): deleting a populated
+        // namespace removes its symbols. Refuse unless the caller confirms with force.
+        if (childCount > 0 && !force) {
+            throw new Exception("Refusing to delete namespace '" + ns.getName(true) + "': it still contains "
+                + childCount + " symbol(s). Move them out first (move_symbol_to_namespace), or pass "
+                + "force=true to delete the namespace and its contents.");
+        }
+
+        java.util.List<String> warnings = new java.util.ArrayList<>();
+        int txId = program.startTransaction("Delete namespace");
+        try {
+            boolean ok = ns.getSymbol().delete();
+            if (!ok) {
+                throw new Exception("Failed to delete namespace symbol: " + name);
+            }
+            if (childCount > 0) {
+                warnings.add("Deleted namespace '" + name + "' which still contained " + childCount + " symbol(s).");
+            }
+            program.endTransaction(txId, true);
+        } catch (Exception e) {
+            program.endTransaction(txId, false);
+            throw e;
+        }
+
+        GhidraEngine.DeleteNamespaceResult result = new GhidraEngine.DeleteNamespaceResult();
+        result.name = name;
+        result.symbolsRemoved = childCount;
+        result.warnings = warnings;
+        return result;
+    }
+
+    /**
      * Get class/namespace information including methods and parent.
      */
     public GhidraEngine.ClassInfo getClassInfo(String name) throws Exception {
@@ -983,16 +1033,48 @@ public class SymbolOps {
      * Set function attributes (calling convention, noReturn, inline, varArgs).
      */
     public GhidraEngine.FunctionAttributesResult setFunctionAttributes(String address, String name,
-            String callingConvention, Boolean noReturn, Boolean inline, Boolean varArgs) throws Exception {
+            String callingConvention, Boolean noReturn, Boolean inline, Boolean varArgs, boolean force) throws Exception {
         Program program = ctx.getProgram();
         Function func = getFunction(address, name);
         if (func == null) {
             throw new Exception("Function not found");
         }
 
+        java.util.List<String> warnings = new java.util.ArrayList<>();
+
+        // Tricky/destructive guard (checked BEFORE mutating): switching to a standard
+        // calling convention re-derives parameter storage and DISCARDS the function's
+        // locked custom/register storage. That is the right fix for phantom
+        // in_EAX/unaff_E** params, but it is destructive — so refuse by default and
+        // require an explicit force=true ("yep sure") confirmation. We do NOT touch
+        // storage for the custom/unknown conventions (use set_custom_signature for
+        // genuine non-standard register layouts).
+        boolean clearCustomStorage = false;
+        if (callingConvention != null) {
+            boolean wantsCustom = callingConvention.equalsIgnoreCase("unknown")
+                    || callingConvention.equalsIgnoreCase("custom")
+                    || callingConvention.equalsIgnoreCase("__custom");
+            if (!wantsCustom && func.hasCustomVariableStorage()) {
+                if (!force) {
+                    throw new Exception("Refusing to set calling convention '" + callingConvention + "' on '"
+                        + func.getName() + "' (" + func.getEntryPoint() + "): it has custom/register parameter "
+                        + "storage (" + func.getParameterCount() + " params, current convention "
+                        + func.getCallingConventionName() + "). Applying a standard convention would CLEAR that "
+                        + "storage and re-derive it — the correct fix for phantom in_EAX/unaff_ params, but "
+                        + "destructive. Re-run with force=true to confirm.");
+                }
+                clearCustomStorage = true;
+            }
+        }
+
         int txId = program.startTransaction("Set function attributes");
         try {
             if (callingConvention != null) {
+                if (clearCustomStorage) {
+                    func.setCustomVariableStorage(false);
+                    warnings.add("Cleared custom variable storage on '" + func.getName()
+                        + "'; parameter storage re-derived from convention '" + callingConvention + "'.");
+                }
                 func.setCallingConvention(callingConvention);
             }
             if (noReturn != null) {
@@ -1017,6 +1099,7 @@ public class SymbolOps {
         result.noReturn = func.hasNoReturn();
         result.isInline = func.isInline();
         result.varArgs = func.hasVarArgs();
+        result.warnings = warnings;
         return result;
     }
 

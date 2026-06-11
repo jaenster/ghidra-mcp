@@ -391,6 +391,21 @@ public class MemoryOps {
             result.put("symbol", symInfo);
         }
 
+        // All symbols at this address (including child labels under a struct symbol)
+        Symbol[] allSyms = program.getSymbolTable().getSymbols(address);
+        if (allSyms != null && allSyms.length > 0) {
+            List<Map<String, Object>> overlapping = new ArrayList<>();
+            for (Symbol s : allSyms) {
+                Map<String, Object> entry = new LinkedHashMap<>();
+                entry.put("name", s.getName());
+                entry.put("fullPath", s.getName(true));
+                entry.put("type", s.getSymbolType().toString());
+                entry.put("isPrimary", s.isPrimary());
+                overlapping.add(entry);
+            }
+            result.put("overlappingSymbols", overlapping);
+        }
+
         // Data info
         Data data = program.getListing().getDataAt(address);
         if (data != null) {
@@ -504,13 +519,19 @@ public class MemoryOps {
         Listing listing = program.getListing();
         List<Map<String, Object>> symbols = new ArrayList<>();
 
+        Set<String> seen = new HashSet<>();
         SymbolIterator iter = symTable.getSymbolIterator(address.add(1), true);
         while (iter.hasNext() && symbols.size() < count) {
             Symbol sym = iter.next();
             if (sym.isDynamic()) continue;
 
-            Map<String, Object> info = new LinkedHashMap<>();
             Address symAddr = sym.getAddress();
+            // Dedupe by address+name: RTTI descriptors produce a flat LABEL and a
+            // namespaced symbol at the same address — keep only the first seen.
+            String dedupeKey = symAddr.toString() + "|" + sym.getName();
+            if (!seen.add(dedupeKey)) continue;
+
+            Map<String, Object> info = new LinkedHashMap<>();
             info.put("address", symAddr.toString());
             info.put("name", sym.getName());
             info.put("fullName", sym.getName(true));
@@ -704,9 +725,10 @@ public class MemoryOps {
                 if (block != null && block.isExecute() && !block.isWrite()) continue;
             }
 
-            // Data type filter
-            if (dataTypeFilter != null && hasExplicitData) {
-                if (!data.getDataType().getName().equals(dataTypeFilter)) continue;
+            // Data type filter (case-insensitive substring match)
+            if (dataTypeFilter != null) {
+                if (!hasExplicitData) continue;
+                if (!data.getDataType().getName().toLowerCase().contains(dataTypeFilter.toLowerCase())) continue;
             }
 
             String symName = sym.getName();

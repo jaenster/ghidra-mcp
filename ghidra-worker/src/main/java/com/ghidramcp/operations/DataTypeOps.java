@@ -769,7 +769,7 @@ public class DataTypeOps {
     /**
      * Set a function's prototype/signature.
      */
-    public void setPrototype(String functionAddress, String prototype, String description) throws Exception {
+    public java.util.List<String> setPrototype(String functionAddress, String prototype, String description, boolean force) throws Exception {
         Program program = ctx.getProgram();
         Address address = ctx.parseAddress(functionAddress);
         Function func = program.getFunctionManager().getFunctionAt(address);
@@ -778,8 +778,36 @@ public class DataTypeOps {
             throw new Exception("Function not found at: " + functionAddress);
         }
 
+        ctx.assertReadBeforeWrite(func.getEntryPoint().toString(), func.getName(), force);
+
+        java.util.List<String> warnings = new java.util.ArrayList<>();
+        boolean clearStorage = false;
+
+        // A plain prototype string carries NO storage info. Functions with custom /
+        // auto-detected register storage (e.g. __usercall EAX-return, __fastcall ECX/EDX,
+        // or any analyzer-detected register params) would have that storage discarded and
+        // reset to the architecture default (__stdcall) — producing phantom
+        // in_EAX/in_ECX/unaff_E** reads and broken decompilation. Refuse by default and
+        // direct the caller to set_custom_signature; proceed only with force=true ("yep sure").
+        if (func.hasCustomVariableStorage()) {
+            if (!force) {
+                throw new Exception("Refusing set_prototype on '" + func.getName() + "' (" + functionAddress
+                    + "): function has custom/register parameter storage (calling convention "
+                    + func.getCallingConventionName() + "). Applying a plain prototype string would reset it to "
+                    + "the default convention and break the decompile (phantom in_EAX/in_ECX/unaff_). "
+                    + "Use set_custom_signature with explicit per-parameter storage, or set_function_variable_type "
+                    + "to change only a parameter's type/name. Pass force=true to apply anyway (clears custom storage).");
+            }
+            clearStorage = true;
+        }
+
         int txId = program.startTransaction("Set prototype");
         try {
+            if (clearStorage) {
+                func.setCustomVariableStorage(false);
+                warnings.add("Cleared custom variable storage on '" + func.getName()
+                    + "' before applying the prototype (force=true) — storage re-derived from the convention.");
+            }
             // Parse the prototype and apply it
             ghidra.app.util.parser.FunctionSignatureParser parser =
                 new ghidra.app.util.parser.FunctionSignatureParser(
@@ -793,24 +821,36 @@ public class DataTypeOps {
             );
 
             // Use ApplyFunctionSignatureCmd to safely replace the signature
-            // (avoids infinite loop in FunctionDB.removeParameter/loadVariables)
+            // (avoids infinite loop in FunctionDB.removeParameter/loadVariables).
+            // preserveCallingConvention=true keeps the function's existing calling
+            // convention (and therefore its parameter-storage scheme) — only the parsed
+            // types/names are applied. This stops the old behavior of forcing __stdcall.
             ghidra.app.cmd.function.ApplyFunctionSignatureCmd cmd =
                 new ghidra.app.cmd.function.ApplyFunctionSignatureCmd(
-                    address, sig, SourceType.USER_DEFINED);
+                    address, sig, SourceType.USER_DEFINED,
+                    true,   // preserveCallingConvention
+                    false   // applyEmptyComposites
+                );
             cmd.applyTo(program);
 
             ctx.updateFunctionPlateComment(func, description);
             program.endTransaction(txId, true);
+            ctx.updateFunctionModCount(func.getEntryPoint().toString());
         } catch (Exception e) {
             program.endTransaction(txId, false);
             throw e;
         }
+        return warnings;
     }
 
     /**
      * Set function signature with custom parameter storage (for non-standard calling conventions)
      */
     public void setCustomSignature(String functionAddress, String returnType, List<GhidraEngine.CustomParameter> parameters, String description) throws Exception {
+        setCustomSignature(functionAddress, returnType, parameters, description, false);
+    }
+
+    public void setCustomSignature(String functionAddress, String returnType, List<GhidraEngine.CustomParameter> parameters, String description, boolean force) throws Exception {
         Program program = ctx.getProgram();
         Address address = ctx.parseAddress(functionAddress);
         Function func = program.getFunctionManager().getFunctionAt(address);
@@ -818,6 +858,8 @@ public class DataTypeOps {
         if (func == null) {
             throw new Exception("Function not found at: " + functionAddress);
         }
+
+        ctx.assertReadBeforeWrite(func.getEntryPoint().toString(), func.getName(), force);
 
         int txId = program.startTransaction("Set custom signature");
         try {
@@ -867,6 +909,7 @@ public class DataTypeOps {
 
             ctx.updateFunctionPlateComment(func, description);
             program.endTransaction(txId, true);
+            ctx.updateFunctionModCount(func.getEntryPoint().toString());
         } catch (Exception e) {
             program.endTransaction(txId, false);
             throw e;

@@ -297,8 +297,16 @@ public class ProjectOps {
             System.setProperty("user.name", user);
         }
 
+        // Use an authenticator that ALSO satisfies a server-demanded password reset.
+        // Ghidra flags users created via `svrAdmin -add` (and accounts left in
+        // "must change on next login" state) as needing a reset; the stock
+        // PasswordClientAuthenticator only supplies the password and cannot answer
+        // the reset challenge, so the worker failed to connect after a daemon restart
+        // with "User password not set, must be reset". Reusing the configured password
+        // as the new password completes the reset and keeps the account stable across
+        // restarts (the user db lives on the persistent /repos volume).
         ghidra.framework.client.ClientUtil.setClientAuthenticator(
-                new ghidra.framework.client.PasswordClientAuthenticator(user, new String(password)));
+                new ResettingPasswordClientAuthenticator(user, new String(password)));
 
         ghidra.framework.client.RepositoryServerAdapter server =
                 ghidra.framework.client.ClientUtil.getRepositoryServer(host, port, true);
@@ -899,5 +907,30 @@ public class ProjectOps {
      */
     private void initializeDecompiler() {
         ctx.setDecompiler(createDecompiler(ctx.getProgram()));
+    }
+
+    /**
+     * A {@link ghidra.framework.client.PasswordClientAuthenticator} that also answers a
+     * server-demanded password reset. Ghidra marks users created with {@code svrAdmin -add}
+     * (and accounts otherwise flagged "must change on next login") as needing a reset; the
+     * stock authenticator returns no new password, so the connect fails with
+     * "User password not set, must be reset" — which left the worker unable to reconnect
+     * after a daemon restart. We complete the reset by setting the new password to the same
+     * configured GHIDRA_SERVER_PASSWORD, keeping the account usable and stable across
+     * restarts (the user database is stored under the persistent /repos volume).
+     */
+    private static final class ResettingPasswordClientAuthenticator
+            extends ghidra.framework.client.PasswordClientAuthenticator {
+        private final char[] newPassword;
+
+        ResettingPasswordClientAuthenticator(String username, String password) {
+            super(username, password);
+            this.newPassword = password.toCharArray();
+        }
+
+        @Override
+        public char[] getNewPassword(java.awt.Component parent, String serverInfo, String username) {
+            return newPassword.clone();
+        }
     }
 }

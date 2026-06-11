@@ -11,6 +11,7 @@ import ghidra.framework.model.DomainObjectListener;
 import ghidra.framework.model.EventType;
 import ghidra.program.model.listing.*;
 import ghidra.program.model.symbol.Symbol;
+import ghidra.program.util.FunctionChangeRecord;
 import ghidra.program.util.ProgramChangeRecord;
 import ghidra.program.util.ProgramEvent;
 
@@ -68,11 +69,22 @@ public class DirtyTracker implements DomainObjectListener {
 
             if (!(rec instanceof ProgramChangeRecord pcr)) continue;
 
-            // Function changes
+            // Function changes — variable type/storage/signature changes arrive here as
+            // FunctionChangeRecord (subclass of ProgramChangeRecord) with getFunction().
             if (eventType == ProgramEvent.FUNCTION_CHANGED
                 || eventType == ProgramEvent.FUNCTION_BODY_CHANGED) {
-                Object obj = pcr.getObject();
-                if (obj instanceof Function func) {
+                Function func = null;
+                if (rec instanceof FunctionChangeRecord fcr) {
+                    func = fcr.getFunction();
+                }
+                if (func == null) {
+                    Object obj = pcr.getObject();
+                    if (obj instanceof Function f) func = f;
+                }
+                if (func == null && pcr.getStart() != null && program != null) {
+                    func = program.getFunctionManager().getFunctionContaining(pcr.getStart());
+                }
+                if (func != null) {
                     dirtyFunctions.add(func.getEntryPoint().toString());
                     changed = true;
                 }
@@ -121,7 +133,9 @@ public class DirtyTracker implements DomainObjectListener {
 
             // Reference changes — find affected functions
             if (eventType == ProgramEvent.REFERENCE_ADDED
-                || eventType == ProgramEvent.REFERENCE_REMOVED) {
+                || eventType == ProgramEvent.REFERENCE_REMOVED
+                || eventType == ProgramEvent.VARIABLE_REFERENCE_ADDED
+                || eventType == ProgramEvent.VARIABLE_REFERENCE_REMOVED) {
                 var start = pcr.getStart();
                 if (start != null && program != null) {
                     Function func = program.getFunctionManager().getFunctionContaining(start);
@@ -140,17 +154,26 @@ public class DirtyTracker implements DomainObjectListener {
 
     private void classifySymbolChange(Symbol sym) {
         if (program == null) return;
-        var addr = sym.getAddress();
-        if (addr == null) return;
 
-        // Check if it's a function
-        Function func = program.getFunctionManager().getFunctionAt(addr);
-        if (func != null) {
-            dirtyFunctions.add(addr.toString());
+        // Parameter and local-variable symbols live in a function's namespace but have
+        // non-memory addresses (stack/register space). Check parent namespace first.
+        var ns = sym.getParentNamespace();
+        if (ns instanceof Function parentFunc) {
+            dirtyFunctions.add(parentFunc.getEntryPoint().toString());
             return;
         }
 
-        // Check if it's at a function entry point
+        var addr = sym.getAddress();
+        if (addr == null) return;
+
+        // Check if it's a function entry point symbol
+        Function func = program.getFunctionManager().getFunctionAt(addr);
+        if (func != null) {
+            dirtyFunctions.add(func.getEntryPoint().toString());
+            return;
+        }
+
+        // Check if it's inside a function body
         func = program.getFunctionManager().getFunctionContaining(addr);
         if (func != null) {
             dirtyFunctions.add(func.getEntryPoint().toString());

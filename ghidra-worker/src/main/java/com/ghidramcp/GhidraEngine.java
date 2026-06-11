@@ -173,7 +173,7 @@ public class GhidraEngine {
         return functionOps.findCallPath(fromSpec, toSpec, maxDepth);
     }
 
-    public List<FunctionInfo> findFunctionsMatching(List<String> calls, List<String> notCalls,
+    public List<FunctionListEntry> findFunctionsMatching(List<String> calls, List<String> notCalls,
                                                      String referencesString, String inNamespace,
                                                      int sizeMin, int sizeMax, int limit) {
         return functionOps.findFunctionsMatching(calls, notCalls, referencesString, inNamespace, sizeMin, sizeMax, limit);
@@ -261,6 +261,10 @@ public class GhidraEngine {
         symbolOps.renameNamespace(oldName, newName);
     }
 
+    public DeleteNamespaceResult deleteNamespace(String name, boolean force) throws Exception {
+        return symbolOps.deleteNamespace(name, force);
+    }
+
     public ClassInfo getClassInfo(String name) throws Exception {
         return symbolOps.getClassInfo(name);
     }
@@ -278,8 +282,8 @@ public class GhidraEngine {
     }
 
     public FunctionAttributesResult setFunctionAttributes(String address, String name,
-            String callingConvention, Boolean noReturn, Boolean inline, Boolean varArgs) throws Exception {
-        return symbolOps.setFunctionAttributes(address, name, callingConvention, noReturn, inline, varArgs);
+            String callingConvention, Boolean noReturn, Boolean inline, Boolean varArgs, boolean force) throws Exception {
+        return symbolOps.setFunctionAttributes(address, name, callingConvention, noReturn, inline, varArgs, force);
     }
 
     public List<String> addFunctionTag(String address, String name, String tag) throws Exception {
@@ -349,12 +353,16 @@ public class GhidraEngine {
         return dataTypeOps.readDataValue(addressStr);
     }
 
-    public void setPrototype(String functionAddress, String prototype, String description) throws Exception {
-        dataTypeOps.setPrototype(functionAddress, prototype, description);
+    public java.util.List<String> setPrototype(String functionAddress, String prototype, String description, boolean force) throws Exception {
+        return dataTypeOps.setPrototype(functionAddress, prototype, description, force);
     }
 
     public void setCustomSignature(String functionAddress, String returnType, List<CustomParameter> parameters, String description) throws Exception {
-        dataTypeOps.setCustomSignature(functionAddress, returnType, parameters, description);
+        dataTypeOps.setCustomSignature(functionAddress, returnType, parameters, description, false);
+    }
+
+    public void setCustomSignature(String functionAddress, String returnType, List<CustomParameter> parameters, String description, boolean force) throws Exception {
+        dataTypeOps.setCustomSignature(functionAddress, returnType, parameters, description, force);
     }
 
     // ============== MemoryOps (14 methods) ==============
@@ -487,15 +495,23 @@ public class GhidraEngine {
     }
 
     public void setFunctionVariableName(String functionAddressStr, String oldName, String newName, String description) throws Exception {
-        analysisOps.setFunctionVariableName(functionAddressStr, oldName, newName, description);
+        analysisOps.setFunctionVariableName(functionAddressStr, oldName, newName, description, false);
+    }
+
+    public void setFunctionVariableName(String functionAddressStr, String oldName, String newName, String description, boolean force) throws Exception {
+        analysisOps.setFunctionVariableName(functionAddressStr, oldName, newName, description, force);
     }
 
     public void setFunctionVariableType(String functionAddressStr, String variableName, String dataTypeName, String description) throws Exception {
-        analysisOps.setFunctionVariableType(functionAddressStr, variableName, dataTypeName, description, true);
+        analysisOps.setFunctionVariableType(functionAddressStr, variableName, dataTypeName, description, true, false);
     }
 
     public void setFunctionVariableType(String functionAddressStr, String variableName, String dataTypeName, String description, boolean forceRemoveConflicts) throws Exception {
-        analysisOps.setFunctionVariableType(functionAddressStr, variableName, dataTypeName, description, forceRemoveConflicts);
+        analysisOps.setFunctionVariableType(functionAddressStr, variableName, dataTypeName, description, forceRemoveConflicts, false);
+    }
+
+    public void setFunctionVariableType(String functionAddressStr, String variableName, String dataTypeName, String description, boolean forceRemoveConflicts, boolean forceGuard) throws Exception {
+        analysisOps.setFunctionVariableType(functionAddressStr, variableName, dataTypeName, description, forceRemoveConflicts, forceGuard);
     }
 
     // ============== VersionTrackingOps ==============
@@ -1119,6 +1135,8 @@ public class GhidraEngine {
         public boolean noReturn;
         public boolean isInline;
         public boolean varArgs;
+        /** Non-fatal notices about destructive/tricky changes that were applied (e.g. cleared custom storage). */
+        public java.util.List<String> warnings;
     }
 
     public static class BatchTagResult {
@@ -1136,6 +1154,12 @@ public class GhidraEngine {
         public String name;
         public String parentNamespace;
         public boolean isClass;
+    }
+
+    public static class DeleteNamespaceResult {
+        public String name;
+        public int symbolsRemoved;
+        public java.util.List<String> warnings;
     }
 
     public static class MoveSymbolResult {

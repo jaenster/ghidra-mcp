@@ -65,6 +65,25 @@ export async function createServer(options: ServerOptions): Promise<{
     if (options.logger) {
       options.logger.info('OAuth enabled for MCP endpoints', { issuer: oauthConfig.publicUrl });
     }
+  } else if (oauthConfig.publicUrl && process.env.GHIDRA_MCP_INSECURE !== '1') {
+    // FAIL-CLOSED on a production misconfiguration: a public URL is set (so this is
+    // an exposed deployment, not local dev) but OAuth isn't fully configured
+    // (missing GHIDRA_MCP_AUTH_SECRET and/or OIDC issuer/client). Previously this
+    // silently fell through to passthrough → every MCP + dashboard route open to the
+    // internet. Refuse instead. Pure local dev (no PUBLIC_URL) stays open; set
+    // GHIDRA_MCP_INSECURE=1 to force-open an exposed instance anyway.
+    const denyClosed: RequestHandler = (_req: Request, res: Response) => {
+      res.status(503).json({
+        error: 'Auth misconfigured: GHIDRA_MCP_PUBLIC_URL is set but OAuth is incomplete ' +
+          '(need GHIDRA_MCP_AUTH_SECRET + OIDC issuer/client). Refusing to serve ' +
+          'unauthenticated. Fix the config, or set GHIDRA_MCP_INSECURE=1 to override.',
+      });
+    };
+    requireAuth = denyClosed;
+    requireDashboardAuth = denyClosed;
+    options.logger?.error(
+      'OAuth NOT fully configured but GHIDRA_MCP_PUBLIC_URL is set — failing closed ' +
+      '(all MCP + dashboard routes return 503). Set GHIDRA_MCP_INSECURE=1 to override.');
   }
 
   // Gate the dashboard's JSON API behind the Authentik session cookie (no-op when
@@ -81,8 +100,11 @@ export async function createServer(options: ServerOptions): Promise<{
     });
   });
 
-  // Status endpoint
-  app.get('/status', (_req: Request, res: Response) => {
+  // Status endpoint. Gated behind dashboard auth: listSessions() exposes binary +
+  // program file paths and session IDs, which must not be readable unauthenticated
+  // (the ingress routes `/` here, so /status is internet-reachable). /health stays
+  // open for k8s probes; it only returns counts.
+  app.get('/status', requireDashboardAuth, (_req: Request, res: Response) => {
     res.json({
       status: 'ok',
       sessions: sessionManager.listSessions(),
@@ -166,6 +188,76 @@ export async function createServer(options: ServerOptions): Promise<{
       return;
     }
     res.json({ success: true });
+  });
+
+  // Restart a session's worker: close + recreate with the same binary/programPath.
+  app.post('/api/sessions/:sessionId/restart', async (req: Request, res: Response) => {
+    try {
+      const { sessionId } = req.params;
+      const session = sessionManager.getSession(sessionId);
+      if (!session) {
+        res.status(404).json({ error: 'Session not found' });
+        return;
+      }
+      const { binaryPath, programPath } = session;
+      await sessionManager.closeSession(sessionId);
+      const newSession = await sessionManager.createSession(binaryPath, { programPath });
+      res.json({ session: newSession });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      res.status(500).json({ error: message });
+    }
+  });
+
+  // Save a session's program (triggers 'save' worker command).
+  app.post('/api/sessions/:sessionId/save', async (req: Request, res: Response) => {
+    try {
+      const { sessionId } = req.params;
+      const result = await sessionManager.sendCommand(sessionId, {
+        id: randomUUID(),
+        command: 'save',
+        params: {},
+      });
+      if (!result.success) {
+        res.status(500).json({ error: result.error?.message ?? 'Save failed' });
+        return;
+      }
+      res.json({ success: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      res.status(500).json({ error: message });
+    }
+  });
+
+  // Commit (check-in) a session to the Ghidra Server (triggers 'checkin' worker command).
+  app.post('/api/sessions/:sessionId/commit', async (req: Request, res: Response) => {
+    try {
+      const { sessionId } = req.params;
+      const message = typeof req.body?.message === 'string' ? req.body.message : '';
+      const result = await sessionManager.sendCommand(sessionId, {
+        id: randomUUID(),
+        command: 'checkin',
+        params: { message },
+      });
+      if (!result.success) {
+        res.status(500).json({ error: result.error?.message ?? 'Commit failed' });
+        return;
+      }
+      res.json({ success: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      res.status(500).json({ error: message });
+    }
+  });
+
+  // Authed /api/status — same counts as /status, accessible from the dashboard.
+  app.get('/api/status', (_req: Request, res: Response) => {
+    res.json({
+      status: 'ok',
+      sessions: sessionManager.listSessions(),
+      workers: workerPool.getWorkerCount(),
+      defaultSession: defaultSessionId,
+    });
   });
 
   // Command history

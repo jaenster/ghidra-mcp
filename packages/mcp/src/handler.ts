@@ -1096,6 +1096,7 @@ export class GhidraToolHandler {
             functionAddress: params.functionAddress as string,
             prototype: params.prototype as string,
             description: params.description as string | undefined,
+            force: params.force as boolean | undefined,
           },
           timeout,
         };
@@ -1501,6 +1502,7 @@ export class GhidraToolHandler {
             noReturn: params.noReturn as boolean | undefined,
             inline: params.inline as boolean | undefined,
             varArgs: params.varArgs as boolean | undefined,
+            force: params.force as boolean | undefined,
           },
           timeout,
         };
@@ -1575,6 +1577,17 @@ export class GhidraToolHandler {
           params: {
             oldName: params.oldName as string,
             newName: params.newName as string,
+          },
+          timeout,
+        };
+
+      case 'delete_namespace':
+        return {
+          id,
+          command: 'delete_namespace',
+          params: {
+            name: params.name as string,
+            force: params.force as boolean | undefined,
           },
           timeout,
         };
