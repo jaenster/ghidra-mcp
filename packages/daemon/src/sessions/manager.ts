@@ -36,12 +36,31 @@ export class SessionManager {
     // Multiple sessions can share a worker (e.g. .gpr with different programPaths),
     // so mark ALL sessions using this workerId as dead.
     this.workerPool.setOnWorkerExit((workerId, _sessionId, code, signal) => {
+      const WINDOW_MS = 10 * 60_000; // 10 min
+      const MAX_DEATHS = 5;
+      const now = Date.now();
       for (const [id, state] of this.sessions) {
         if (state.workerId === workerId) {
           state.status = 'error';
           state.error = `Worker died (code=${code}, signal=${signal})`;
           state.workerId = undefined;
-          console.log(`[SessionManager] Worker died for session ${id} (code=${code}, signal=${signal})`);
+          // Circuit-breaker: a worker that keeps dying (e.g. OOMKilled under load) must
+          // not become an endless 30s respawn loop. Count deaths in a sliding window.
+          state.recentDeaths = (state.recentDeaths ?? []).filter((t) => now - t < WINDOW_MS);
+          state.recentDeaths.push(now);
+          const oom = code === 137 ? ' (OOMKilled)' : '';
+          console.log(
+            `[SessionManager] Worker died for session ${id} (code=${code}, signal=${signal})${oom} ` +
+            `[${state.recentDeaths.length}/${MAX_DEATHS} deaths in ${WINDOW_MS / 60_000}min]`,
+          );
+          if (state.recentDeaths.length >= MAX_DEATHS && !state.respawnGivenUp) {
+            state.respawnGivenUp = true;
+            console.error(
+              `[SessionManager] Session ${id}: ${state.recentDeaths.length} worker deaths in ` +
+              `${WINDOW_MS / 60_000}min — GIVING UP auto-respawn (likely OOM/crash-loop; raise ` +
+              `worker memory or reduce client concurrency, then recreate the session).`,
+            );
+          }
         }
       }
     });
@@ -559,10 +578,20 @@ export class SessionManager {
       throw new Error(`Session not found: ${sessionId}`);
     }
 
-    // Auto-respawn dead workers (rate-limited to prevent respawn loops)
+    // Auto-respawn dead workers — exponential backoff + circuit-breaker (deaths are
+    // counted in setOnWorkerExit) so a worker that keeps dying can't loop forever.
     if (state.status === 'error' && !state.workerId) {
+      if (state.respawnGivenUp) {
+        throw new Error(
+          `Session worker died repeatedly and auto-respawn was given up ` +
+          `(likely OOMKilled or crash-looping — raise worker memory / lower client concurrency, ` +
+          `then recreate the session). Last error: ${state.error}`,
+        );
+      }
       const now = Date.now();
-      const cooldown = 30_000; // 30s between respawn attempts
+      const deaths = state.recentDeaths?.length ?? 1;
+      // Back off the more it has died: 30s, 60s, 120s, 240s … capped at 5 min.
+      const cooldown = Math.min(30_000 * 2 ** (deaths - 1), 300_000);
       if (state.lastRespawnAt && now - state.lastRespawnAt < cooldown) {
         const waitSec = Math.ceil((cooldown - (now - state.lastRespawnAt)) / 1000);
         throw new Error(`Worker died, respawn cooling down (${waitSec}s remaining). Last error: ${state.error}`);
@@ -573,8 +602,6 @@ export class SessionManager {
       }
       try {
         await state.respawnPromise;
-      } catch (error) {
-        throw error;
       } finally {
         state.respawnPromise = undefined;
       }
@@ -876,6 +903,10 @@ interface SessionState {
   error?: string;
   respawnPromise?: Promise<void>;
   lastRespawnAt?: number;
+  /** Death timestamps (ms) in a sliding window; drives respawn backoff + circuit-breaker. */
+  recentDeaths?: number[];
+  /** Set once the worker has died too many times in the window — stop auto-respawning. */
+  respawnGivenUp?: boolean;
   ghidraServer?: GhidraServerInfo;
 }
 

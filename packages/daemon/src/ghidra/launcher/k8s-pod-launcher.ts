@@ -162,9 +162,20 @@ export class K8sPodLauncher implements WorkerLauncher {
     this.stopping.add(podName);
     setTimeout(() => this.stopping.delete(podName), 10000).unref?.();
 
-    const reason = `pod:${type}:${phase ?? 'deleted'}`;
-    console.log(`[K8sPodLauncher] worker ${workerId} pod ${podName} terminal (${reason})`);
-    this.diedHandler?.(workerId, reason, null, null);
+    // Dig the container's termination detail out of pod status so OOMKilled / exit code
+    // surface in logs instead of the useless `code=null, signal=null`.
+    const cs =
+      pod?.status?.containerStatuses?.find((s: any) => s?.name === 'worker') ??
+      pod?.status?.containerStatuses?.[0];
+    const term = cs?.state?.terminated ?? cs?.lastState?.terminated;
+    const termReason: string | undefined = term?.reason; // e.g. "OOMKilled", "Error"
+    const exitCode: number | null = typeof term?.exitCode === 'number' ? term.exitCode : null;
+    const reason = `pod:${type}:${phase ?? 'deleted'}${termReason ? `:${termReason}` : ''}`;
+    console.log(
+      `[K8sPodLauncher] worker ${workerId} pod ${podName} terminal (${reason}` +
+      `${exitCode !== null ? `, exit=${exitCode}` : ''})`,
+    );
+    this.diedHandler?.(workerId, reason, exitCode, null);
 
     // Reap a crashed/completed pod so it doesn't linger in Error (restartPolicy: Never +
     // ownerRef GC only fires on daemon death). Skip if it's already being deleted.
@@ -195,7 +206,18 @@ export class K8sPodLauncher implements WorkerLauncher {
       );
     }
     const heapMi = heapToMib(spec.memory);
-    const limitMi = heapMi + 512; // headroom for JVM non-heap + Ghidra native
+    // Ghidra needs substantial OFF-heap memory on top of the JVM max-heap: the
+    // decompiler runs as a NATIVE subprocess, the program is mmap'd, plus JVM
+    // non-heap (metaspace / thread stacks / code cache / direct buffers). The old
+    // `heap + 512` left far too little headroom — under sustained decompile load the
+    // pod RSS blew past the limit and the kernel OOMKilled it (pod→Failed), which a
+    // missing respawn circuit-breaker then turned into a crash loop.
+    // Default overhead ≈ heap (so limit ≈ 2× heap), tunable via env for big binaries.
+    const overrideMi = parseInt(process.env.GHIDRA_MCP_WORKER_MEM_OVERHEAD_MI ?? '', 10);
+    const overheadMi = Number.isFinite(overrideMi) && overrideMi > 0
+      ? overrideMi
+      : Math.max(1024, heapMi);
+    const limitMi = heapMi + overheadMi;
 
     // Inherit the daemon pod's networking/scheduling so workers reach the RMI server
     // (hostAliases) and stay off the ghidra node (affinity), exactly like the daemon.
