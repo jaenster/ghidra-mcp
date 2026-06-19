@@ -474,6 +474,10 @@ public class GhidraEngine {
         return analysisOps.executePythonScript(code, filePath, timeout, sandbox);
     }
 
+    public ScriptResult executeJavaScript(String code, int timeout, boolean sandbox) throws Exception {
+        return analysisOps.executeJavaScript(code, timeout, sandbox);
+    }
+
     public UndoRedoResult undo() throws Exception {
         return analysisOps.undo();
     }

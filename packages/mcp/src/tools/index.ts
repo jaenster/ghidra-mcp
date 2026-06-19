@@ -1070,9 +1070,12 @@ export const llmPowerTools: ToolDefinition[] = [
 
   defineTool(
     'execute_script',
-    'Execute a Python or JavaScript script for custom Ghidra analysis. ' +
-    'Python scripts (Jython 2.7) have access to currentProgram, monitor, ' +
-    'and all GhidraScript/FlatProgramAPI methods as bare functions.',
+    'Execute a Java GhidraScript for custom Ghidra analysis (recommended). ' +
+    'The Java body runs as a GhidraScript.run() with access to currentProgram, ' +
+    'monitor, println(...), and all GhidraScript/FlatProgramAPI methods. Wrap ' +
+    'mutations in a transaction (start("msg")/end(true) or ' +
+    'currentProgram.startTransaction/endTransaction). Python (Jython) was removed ' +
+    'in Ghidra 12.1 and is not available on this build.',
     {
       ...sessionIdProp,
       code: {
@@ -1081,12 +1084,14 @@ export const llmPowerTools: ToolDefinition[] = [
       },
       filePath: {
         type: 'string',
-        description: 'Path to a .py or .js script file to execute.',
+        description: 'Path to a .java, .py, or .js script file to execute.',
       },
       language: {
         type: 'string',
-        enum: ['python', 'javascript'],
-        description: 'Script language (default: "python"). Auto-detected from file extension.',
+        enum: ['java', 'python', 'javascript'],
+        description:
+          'Script language. Use "java" (working GhidraScript path). Python is ' +
+          'stubbed (Jython removed in 12.1). Auto-detected from file extension.',
       },
       scriptTimeout: {
         type: 'number',
