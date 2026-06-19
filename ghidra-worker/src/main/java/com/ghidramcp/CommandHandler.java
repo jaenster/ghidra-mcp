@@ -1145,10 +1145,19 @@ public class CommandHandler {
         if (filePath != null && language.equals("python") && filePath.endsWith(".js")) {
             language = "javascript";
         }
+        if (filePath != null && language.equals("python") && filePath.endsWith(".java")) {
+            language = "java";
+        }
 
         GhidraEngine.ScriptResult scriptResult;
         if (language.equals("python")) {
             scriptResult = engine.executePythonScript(code, filePath, timeout, sandbox);
+        } else if (language.equals("java")) {
+            // Java GhidraScript path — read file if needed
+            if (code == null && filePath != null) {
+                code = new String(java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(filePath)));
+            }
+            scriptResult = engine.executeJavaScript(code, timeout, sandbox);
         } else {
             // JavaScript path — read file if needed
             if (code == null && filePath != null) {

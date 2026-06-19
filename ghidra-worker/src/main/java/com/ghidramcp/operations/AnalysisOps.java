@@ -1548,6 +1548,217 @@ public class AnalysisOps {
     }
 
     // =====================================================================
+    //  JAVA SCRIPT EXECUTION (compiles a GhidraScript subclass and runs it)
+    // =====================================================================
+
+    /**
+     * Executes user-supplied Java code against the loaded program.
+     *
+     * <p>The body is wrapped as the {@code run()} method of an anonymous
+     * {@link ghidra.app.script.GhidraScript} subclass, compiled on the fly with
+     * the platform {@link javax.tools.JavaCompiler}, and executed via
+     * {@link ghidra.app.script.GhidraScript#execute}. We compile a real
+     * {@code GhidraScript} (rather than going through Ghidra's OSGi-backed
+     * {@code JavaScriptProvider}) because the OSGi {@code BundleHost} is not set
+     * up under {@code HeadlessGhidraApplicationConfiguration}; a direct
+     * {@code javax.tools} compile is self-contained and robust headless. The
+     * compiler classpath is derived from the running JVM's {@code java.class.path}
+     * (expanding any {@code lib/*} wildcard entries) so {@code ghidra.*} imports
+     * resolve against the same jars the worker is already running on.
+     *
+     * <p>Inside the body the caller has the full {@code GhidraScript} surface:
+     * {@code currentProgram} (the loaded program), {@code monitor},
+     * {@code println(...)} (captured into the result output), {@code currentAddress},
+     * plus every {@code GhidraScript}/{@code FlatProgramAPI} helper. Mutations must
+     * be wrapped in a transaction — either via the GhidraScript helpers
+     * {@code start(String)}/{@code end(boolean)} or directly with
+     * {@code currentProgram.startTransaction(...)}/{@code endTransaction(...)}.
+     * GhidraScript does <em>not</em> open a transaction automatically for
+     * {@code run()} in this mode.
+     */
+    public GhidraEngine.ScriptResult executeJavaScript(String code, int timeout, boolean sandbox) throws Exception {
+        final Program program = ctx.getProgram();
+        final TaskMonitor monitor = ctx.getMonitor();
+
+        GhidraEngine.ScriptResult result = new GhidraEngine.ScriptResult();
+        result.output = "";
+
+        if (program == null) {
+            result.success = false;
+            result.error = "No program is loaded.";
+            return result;
+        }
+
+        javax.tools.JavaCompiler compiler = javax.tools.ToolProvider.getSystemJavaCompiler();
+        if (compiler == null) {
+            result.success = false;
+            result.error = "No Java compiler available (JRE without javac). "
+                + "The worker must run on a JDK for language=java scripts.";
+            return result;
+        }
+
+        java.io.File tmpDir = null;
+        try {
+            // Unique class name so repeated runs never collide in one JVM.
+            String className = "GhidraMcpScript_" + Long.toHexString(System.nanoTime());
+            String source =
+                "import ghidra.app.script.GhidraScript;\n"
+                + "import ghidra.program.model.address.*;\n"
+                + "import ghidra.program.model.data.*;\n"
+                + "import ghidra.program.model.listing.*;\n"
+                + "import ghidra.program.model.mem.*;\n"
+                + "import ghidra.program.model.pcode.*;\n"
+                + "import ghidra.program.model.symbol.*;\n"
+                + "import ghidra.program.model.scalar.*;\n"
+                + "import ghidra.util.task.TaskMonitor;\n"
+                + "import java.util.*;\n"
+                + "public class " + className + " extends GhidraScript {\n"
+                + "    @Override\n"
+                + "    protected void run() throws Exception {\n"
+                + code + "\n"
+                + "    }\n"
+                + "}\n";
+
+            tmpDir = java.nio.file.Files.createTempDirectory("ghidra-mcp-java").toFile();
+            java.io.File srcFile = new java.io.File(tmpDir, className + ".java");
+            java.nio.file.Files.write(srcFile.toPath(), source.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+
+            // Build the compiler classpath from the running JVM so ghidra.* resolves.
+            String classpath = buildCompilerClasspath();
+
+            javax.tools.DiagnosticCollector<javax.tools.JavaFileObject> diagnostics =
+                new javax.tools.DiagnosticCollector<>();
+            StringWriter compilerOut = new StringWriter();
+            javax.tools.StandardJavaFileManager fileManager =
+                compiler.getStandardFileManager(diagnostics, null, java.nio.charset.StandardCharsets.UTF_8);
+
+            List<String> options = new ArrayList<>(Arrays.asList(
+                "-classpath", classpath,
+                "-d", tmpDir.getAbsolutePath()));
+
+            Iterable<? extends javax.tools.JavaFileObject> units =
+                fileManager.getJavaFileObjects(srcFile);
+            boolean compiled = compiler.getTask(
+                compilerOut, fileManager, diagnostics, options, null, units).call();
+            fileManager.close();
+
+            if (!compiled) {
+                StringBuilder errs = new StringBuilder("Java compilation failed:\n");
+                for (javax.tools.Diagnostic<?> d : diagnostics.getDiagnostics()) {
+                    // Report the line within the user body (header adds a fixed offset).
+                    long line = d.getLineNumber();
+                    errs.append("  ").append(d.getKind()).append(": ")
+                        .append(d.getMessage(null));
+                    if (line >= 0) {
+                        errs.append(" (script line ~").append(Math.max(1, line - 11)).append(")");
+                    }
+                    errs.append("\n");
+                }
+                if (compilerOut.getBuffer().length() > 0) {
+                    errs.append(compilerOut);
+                }
+                result.success = false;
+                result.error = errs.toString();
+                return result;
+            }
+
+            // Load and instantiate the compiled GhidraScript subclass. Parent the
+            // loader on this class's loader so ghidra.* / GhidraScript resolve.
+            final java.net.URLClassLoader loader = new java.net.URLClassLoader(
+                new java.net.URL[]{ tmpDir.toURI().toURL() },
+                getClass().getClassLoader());
+            final Class<?> scriptClass = Class.forName(className, true, loader);
+            final ghidra.app.script.GhidraScript script =
+                (ghidra.app.script.GhidraScript) scriptClass.getDeclaredConstructor().newInstance();
+
+            // Bind the loaded program into a GhidraState (no PluginTool headless).
+            ghidra.framework.model.Project project =
+                (ctx.getProject() != null) ? ctx.getProject().getProject() : null;
+            final GhidraState state = new GhidraState(
+                null, project, program, null, null, null);
+
+            final StringWriter scriptOut = new StringWriter();
+            final PrintWriter writer = new PrintWriter(scriptOut, true);
+
+            Future<Void> future = java.util.concurrent.Executors.newSingleThreadExecutor().submit(() -> {
+                script.execute(state, monitor, writer);
+                return null;
+            });
+
+            try {
+                future.get(timeout, java.util.concurrent.TimeUnit.SECONDS);
+                writer.flush();
+                result.success = true;
+                result.output = scriptOut.toString();
+            } catch (java.util.concurrent.TimeoutException e) {
+                future.cancel(true);
+                result.success = false;
+                result.error = "Script execution timed out after " + timeout + " seconds";
+                result.output = scriptOut.toString();
+            } catch (java.util.concurrent.ExecutionException e) {
+                writer.flush();
+                Throwable cause = (e.getCause() != null) ? e.getCause() : e;
+                StringWriter sw = new StringWriter();
+                cause.printStackTrace(new PrintWriter(sw));
+                result.success = false;
+                result.error = "Script threw " + cause.getClass().getSimpleName()
+                    + ": " + cause.getMessage() + "\n" + sw;
+                result.output = scriptOut.toString();
+            } finally {
+                try { loader.close(); } catch (Exception ignore) { }
+            }
+
+        } catch (Exception e) {
+            result.success = false;
+            result.error = "Execution error: " + e.getClass().getSimpleName() + ": " + e.getMessage();
+        } finally {
+            if (tmpDir != null) {
+                deleteRecursive(tmpDir);
+            }
+        }
+
+        return result;
+    }
+
+    /**
+     * Builds a javac classpath from the running JVM's {@code java.class.path},
+     * expanding any {@code .../lib/*} wildcard entries (Ghidra is launched with
+     * such globs) into the concrete jars they match.
+     */
+    private static String buildCompilerClasspath() {
+        String raw = System.getProperty("java.class.path", "");
+        String sep = File.pathSeparator;
+        LinkedHashSet<String> entries = new LinkedHashSet<>();
+        for (String part : raw.split(Pattern.quote(sep))) {
+            if (part.isEmpty()) {
+                continue;
+            }
+            if (part.endsWith("*")) {
+                java.io.File dir = new java.io.File(part.substring(0, part.length() - 1));
+                java.io.File[] jars = dir.listFiles((d, n) -> n.endsWith(".jar"));
+                if (jars != null) {
+                    for (java.io.File jar : jars) {
+                        entries.add(jar.getAbsolutePath());
+                    }
+                }
+            } else {
+                entries.add(part);
+            }
+        }
+        return String.join(sep, entries);
+    }
+
+    private static void deleteRecursive(java.io.File f) {
+        java.io.File[] kids = f.listFiles();
+        if (kids != null) {
+            for (java.io.File k : kids) {
+                deleteRecursive(k);
+            }
+        }
+        f.delete();
+    }
+
+    // =====================================================================
     //  PYTHON SCRIPT EXECUTION (Jython removed in 12.1 — stubbed)
     // =====================================================================
 
