@@ -252,6 +252,7 @@ export class WorkerPool {
       `-Xmx${memoryLimit}`,
       '-Duser.language=en',
       '-Duser.country=US',
+      `-Dghidra.mcp.decompiler.threads=${process.env.GHIDRA_MCP_DECOMPILER_THREADS ?? '8'}`,
       '-cp', classpath,
       'com.ghidramcp.Worker',
       '--worker-id', workerId,

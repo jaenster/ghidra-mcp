@@ -55,6 +55,8 @@ public class FunctionOps {
         int total = 0;
         int skipped = 0;
 
+        List<Function> pageFuncs = new ArrayList<>();
+
         while (iter.hasNext()) {
             Function func = iter.next();
 
@@ -80,12 +82,218 @@ public class FunctionOps {
                 continue;
             }
 
-            if (functions.size() < limit) {
-                functions.add(getFunctionInfo(func));
+            if (pageFuncs.size() < limit) {
+                pageFuncs.add(func);
             }
         }
 
+        functions = buildFunctionInfoBatch(pageFuncs);
+
         return new GhidraEngine.ListFunctionsResult(functions, total);
+    }
+
+    /**
+     * Build FunctionInfo for a batch of functions, running enrichment decompiles in
+     * parallel on the DecompilerPool when available. Falls back to serial enrichment
+     * (same as the single-function path) when the pool is absent.
+     */
+    private List<GhidraEngine.FunctionInfo> buildFunctionInfoBatch(List<Function> funcs) {
+        List<GhidraEngine.FunctionInfo> results = new ArrayList<>(funcs.size());
+
+        // Cheap pass: build all FunctionInfo objects without enrichment.
+        for (Function func : funcs) {
+            results.add(getFunctionInfoCheap(func));
+        }
+
+        // Identify which entries need enrichment.
+        com.ghidramcp.DecompilerPool pool = ctx.getDecompilerPool();
+        List<Integer> needsEnrich = new ArrayList<>();
+        for (int i = 0; i < results.size(); i++) {
+            if (hasUndefinedType(results.get(i))) {
+                needsEnrich.add(i);
+            }
+        }
+
+        if (needsEnrich.isEmpty()) {
+            return results;
+        }
+
+        if (pool != null) {
+            // Submit all enrichment decompiles concurrently.
+            List<Future<DecompileResults>> futures = new ArrayList<>(needsEnrich.size());
+            for (int idx : needsEnrich) {
+                futures.add(pool.submit(funcs.get(idx), 30));
+            }
+            for (int fi = 0; fi < needsEnrich.size(); fi++) {
+                int idx = needsEnrich.get(fi);
+                try {
+                    DecompileResults dr = futures.get(fi).get();
+                    applyEnrichment(results.get(idx), dr);
+                } catch (Exception e) {
+                    // best-effort; raw types remain unchanged
+                }
+            }
+        } else {
+            // Serial fallback via the shared decompiler.
+            for (int idx : needsEnrich) {
+                try {
+                    DecompileResults dr = ctx.getDecompiler().decompileFunction(
+                            funcs.get(idx), 30, ctx.getMonitor());
+                    applyEnrichment(results.get(idx), dr);
+                } catch (Exception e) {
+                    // best-effort
+                }
+            }
+        }
+
+        return results;
+    }
+
+    /** Returns true if any local variable or parameter has an undefined* data type. */
+    private static boolean hasUndefinedType(GhidraEngine.FunctionInfo info) {
+        for (GhidraEngine.VariableInfo v : info.localVariables)
+            if (v.dataType != null && v.dataType.startsWith("undefined")) return true;
+        for (GhidraEngine.ParameterInfo p : info.parameters)
+            if (p.dataType != null && p.dataType.startsWith("undefined")) return true;
+        return false;
+    }
+
+    /**
+     * Apply resolvedType comments from a HighFunction onto an already-built FunctionInfo.
+     * Same logic and output format as the enrichment in getFunctionInfo.
+     */
+    private static void applyEnrichment(GhidraEngine.FunctionInfo info, DecompileResults dr) {
+        if (dr == null || !dr.decompileCompleted()) return;
+        HighFunction hf = dr.getHighFunction();
+        if (hf == null) return;
+
+        Map<String, String> resolvedByName = new HashMap<>();
+        LocalSymbolMap lsm = hf.getLocalSymbolMap();
+        Iterator<HighSymbol> sit = lsm.getSymbols();
+        while (sit.hasNext()) {
+            HighSymbol hs = sit.next();
+            String dt = hs.getDataType() != null ? hs.getDataType().getName() : null;
+            if (dt != null && !dt.startsWith("undefined"))
+                resolvedByName.put(hs.getName(), dt);
+        }
+        for (GhidraEngine.VariableInfo v : info.localVariables) {
+            if (v.dataType != null && v.dataType.startsWith("undefined")) {
+                String resolved = resolvedByName.get(v.name);
+                if (resolved != null)
+                    v.dataType = v.dataType + " /* resolvedType: " + resolved + " */";
+            }
+        }
+        for (GhidraEngine.ParameterInfo p : info.parameters) {
+            if (p.dataType != null && p.dataType.startsWith("undefined")) {
+                String resolved = resolvedByName.get(p.name);
+                if (resolved != null)
+                    p.dataType = p.dataType + " /* resolvedType: " + resolved + " */";
+            }
+        }
+    }
+
+    /**
+     * Build FunctionInfo without the enrichment decompile step.
+     * Used by buildFunctionInfoBatch; enrichment is applied separately.
+     */
+    private GhidraEngine.FunctionInfo getFunctionInfoCheap(Function func) {
+        GhidraEngine.FunctionInfo info = new GhidraEngine.FunctionInfo();
+        info.name = func.getName();
+        info.address = func.getEntryPoint().toString();
+        info.entryPoint = func.getEntryPoint().toString();
+        info.signature = func.getSignature().getPrototypeString();
+        info.returnType = func.getReturnType().getName();
+        info.callingConvention = func.getCallingConventionName();
+        info.size = (int) func.getBody().getNumAddresses();
+        info.isThunk = func.isThunk();
+        info.isExternal = func.isExternal();
+        info.hasVarArgs = func.hasVarArgs();
+
+        Namespace ns = func.getParentNamespace();
+        if (ns != null && !ns.isGlobal()) {
+            info.namespace = ns.getName(true);
+        }
+
+        info.parameters = new ArrayList<>();
+        for (Parameter param : func.getParameters()) {
+            GhidraEngine.ParameterInfo pinfo = new GhidraEngine.ParameterInfo();
+            pinfo.name = param.getName();
+            pinfo.dataType = param.getDataType().getName();
+            pinfo.size = param.getLength();
+            pinfo.ordinal = param.getOrdinal();
+            pinfo.storage = param.getVariableStorage().toString();
+            pinfo.stackOffset = param.isStackVariable() ? param.getStackOffset() : null;
+            info.parameters.add(pinfo);
+        }
+
+        info.localVariables = new ArrayList<>();
+        for (Variable var : func.getLocalVariables()) {
+            GhidraEngine.VariableInfo vinfo = new GhidraEngine.VariableInfo();
+            vinfo.name = var.getName();
+            vinfo.dataType = var.getDataType().getName();
+            vinfo.size = var.getLength();
+            vinfo.storage = var.getVariableStorage().toString();
+            vinfo.stackOffset = var.isStackVariable() ? var.getStackOffset() : null;
+            info.localVariables.add(vinfo);
+        }
+
+        info.comment = func.getComment();
+
+        try {
+            Address entryPoint = func.getEntryPoint();
+            SourceFileManager sourceManager = ctx.getProgram().getSourceFileManager();
+            if (sourceManager != null) {
+                java.util.List<SourceMapEntry> entries = sourceManager.getSourceMapEntries(entryPoint);
+                if (entries != null && !entries.isEmpty()) {
+                    SourceMapEntry entry = entries.get(0);
+                    ghidra.program.database.sourcemap.SourceFile sourceFile = entry.getSourceFile();
+                    if (sourceFile != null) {
+                        info.sourceFile = sourceFile.getPath().toString();
+                        info.sourceLine = entry.getLineNumber();
+                    }
+                }
+            }
+
+            CodeUnit cu = ctx.getProgram().getListing().getCodeUnitAt(entryPoint);
+            if (cu != null && info.sourceFile == null) {
+                String plateComment = cu.getComment(CodeUnit.PLATE_COMMENT);
+                if (plateComment != null) {
+                    java.util.regex.Pattern srcPattern = java.util.regex.Pattern.compile(
+                        "(?:Source:\\s*)?([^:]+\\.[chp]{1,3}p?):(\\d+)", java.util.regex.Pattern.CASE_INSENSITIVE);
+                    java.util.regex.Matcher m = srcPattern.matcher(plateComment);
+                    if (m.find()) {
+                        info.sourceFile = m.group(1);
+                        info.sourceLine = Integer.parseInt(m.group(2));
+                    } else {
+                        if (plateComment.contains(".c") || plateComment.contains(".cpp") ||
+                            plateComment.contains(".h") || plateComment.contains("line")) {
+                            info.sourceInfo = plateComment;
+                        }
+                    }
+                }
+            }
+
+            for (ghidra.program.model.listing.FunctionTag tag : func.getTags()) {
+                String tagName = tag.getName();
+                if (tagName.startsWith("SOURCE:") || tagName.contains(".c:") ||
+                    tagName.contains(".cpp:") || tagName.contains(".h:")) {
+                    if (info.sourceInfo == null) {
+                        info.sourceInfo = tagName;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            // source info unavailable
+        }
+
+        List<JsonObject> parsedTags = ctx.parseStructuredTags(func);
+        if (!parsedTags.isEmpty()) {
+            info.tags = parsedTags;
+        }
+
+        ctx.recordFunctionRead(func.getEntryPoint().toString(), ctx.getProgram().getModificationNumber());
+
+        return info;
     }
 
     /**

@@ -1355,7 +1355,7 @@ public class AnalysisOps {
 
             // Create JumpTable override
             ArrayList<Address> destList = new ArrayList<>(caseAddrs);
-            JumpTable jt = new JumpTable(branchAddr, destList, true, 0);
+            JumpTable jt = new JumpTable(branchAddr, destList, true);
             jt.writeOverride(func);
 
             // Rebuild function body to pick up the new cases
