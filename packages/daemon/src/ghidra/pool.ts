@@ -147,9 +147,15 @@ export class WorkerPool {
    */
   private checkHeartbeatStaleness(): void {
     const now = Date.now();
+    // A worker that goes silent is normally dead, but during a long client-side
+    // generation phase (tens of minutes with no commands sent) an idle worker can
+    // stop heartbeating yet still be perfectly alive — reaping it then deadlocks
+    // the client's next query. Make the threshold configurable so long runs don't
+    // false-reap idle workers.
+    const staleMs = Number(process.env.GHIDRA_MCP_HEARTBEAT_STALE_MS) || 60000;
     for (const [workerId, state] of this.workers) {
       if (state.status === 'stopped' || state.status === 'stopping') continue;
-      if (state.lastHeartbeat && now - state.lastHeartbeat > 60000) {
+      if (state.lastHeartbeat && now - state.lastHeartbeat > staleMs) {
         console.log(`[WorkerPool] worker ${workerId} heartbeat stale (>${Math.round((now - state.lastHeartbeat) / 1000)}s)`);
         this.markWorkerDead(workerId, null, null);
       }
