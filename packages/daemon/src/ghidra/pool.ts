@@ -74,7 +74,7 @@ interface SpawnOptions {
   ghidraServer?: GhidraServerSpawnOptions;
 }
 
-const WORKER_STARTUP_TIMEOUT_MS = 60000;
+const WORKER_STARTUP_TIMEOUT_MS = Number(process.env.GHIDRA_MCP_STARTUP_TIMEOUT_MS) || 60000;
 const DEFAULT_COMMAND_TIMEOUT_MS = 120000; // 2 minutes — list commands on large binaries can be slow
 
 export interface WorkerPoolOptions {
