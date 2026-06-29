@@ -1,0 +1,85 @@
+// Architecture model for ghidra-mcp, written in LikeC4 (https://likec4.dev).
+// Render:  npx likec4 serve docs/architecture   (interactive)
+//          npx likec4 export png -o docs/architecture docs/architecture
+specification {
+  element actor {
+    style {
+      shape person
+    }
+  }
+  element system
+  element container
+  element store {
+    style {
+      shape cylinder
+    }
+  }
+  element external {
+    style {
+      color secondary
+    }
+  }
+}
+
+model {
+  user = actor 'AI agent (claude.ai)' {
+    description 'A Claude user driving a reverse-engineering session through MCP tools.'
+  }
+
+  ghidraServer = external 'Shared Ghidra Server' {
+    description 'Collaborative Ghidra repository server (RMI 13100-13102). Source of truth for programs; analysis is committed back and shared.'
+    technology 'Ghidra Server / RMI'
+  }
+
+  oidc = external 'OIDC provider' {
+    description 'Optional upstream identity provider for federated human login. Only allow-listed users get tokens.'
+    technology 'OIDC'
+  }
+
+  ghidramcp = system 'ghidra-mcp' {
+    description 'Headless Ghidra exposed as Model Context Protocol tools over SSE / Streamable HTTP.'
+
+    daemon = container 'Daemon' {
+      description 'MCP server, transport, OAuth 2.1 authorization server, session manager and worker pool. Holds no Ghidra state itself.'
+      technology 'Node / TypeScript'
+    }
+
+    worker = container 'Ghidra worker' {
+      description 'One per session. A JVM with Ghidra on its classpath that opens the program and runs the actual decompile/analysis commands. Local child process, or one k8s pod per worker.'
+      technology 'Java / Ghidra (headless)'
+    }
+
+    dashboard = container 'Dashboard' {
+      description 'Read-only monitoring UI served at /dashboard.'
+      technology 'React'
+    }
+
+    state = store 'State DB' {
+      description 'OAuth clients/tokens, the worker secret, and per-session project data.'
+      technology 'sql.js + PVC'
+    }
+  }
+
+  // --- Relationships ---
+  user -> daemon 'Calls MCP tools' 'SSE / Streamable HTTP'
+  user -> dashboard 'Monitors sessions' 'HTTPS'
+  daemon -> oidc 'Federates human login' 'OIDC'
+  daemon -> worker 'Spawns one per session; dispatches commands' 'internal control-plane'
+  daemon -> state 'Reads/writes'
+  worker -> daemon 'Connects back; streams results' 'HTTP / WebSocket'
+  worker -> ghidraServer 'Opens program from repository' 'RMI'
+}
+
+views {
+  view index {
+    title 'ghidra-mcp — system context'
+    include *
+    autoLayout LeftRight
+  }
+
+  view containers of ghidramcp {
+    title 'ghidra-mcp — containers (one worker per session)'
+    include *
+    autoLayout LeftRight
+  }
+}

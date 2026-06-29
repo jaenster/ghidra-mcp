@@ -32,6 +32,12 @@ The daemon launches a worker through a pluggable **backend**: a local child proc
 
 ## Architecture
 
+![ghidra-mcp system context](docs/architecture/context.png)
+
+> Diagrams are generated from the [LikeC4](https://likec4.dev) model in
+> [`docs/architecture/ghidra-mcp.c4`](docs/architecture/ghidra-mcp.c4)
+> (`npx likec4 serve docs/architecture` to explore interactively).
+
 ### Local mode
 
 ```
@@ -52,6 +58,12 @@ pod runs the same image (JVM entrypoint), connects **back** to the daemon over t
 in-cluster Service, opens the program from the **shared Ghidra Server**, and serves the
 analysis. The pod is deleted when the session ends, and garbage-collected (via
 `ownerReferences`) if the daemon itself dies.
+
+![ghidra-mcp containers](docs/architecture/containers.png)
+
+In Kubernetes each container above maps to a pod: the **Daemon** is the long-lived
+Deployment, and every **Ghidra worker** is a short-lived pod the daemon creates through
+the Kubernetes API (one per session) and reaps when the session ends.
 
 ```
    claude.ai --HTTPS--> Ingress --> ghidra-mcp Service --> daemon pod (Node, OAuth)

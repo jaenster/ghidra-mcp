@@ -45,7 +45,7 @@ spec:
         - name: ghcr               # docker-registry secret for ghcr.io (if private)
       containers:
         - name: ghidra-mcp
-          image: ghcr.io/jaenster/ghidra-mcp-remote:latest
+          image: ghcr.io/jaenster/ghidra-mcp:latest
           # --force: the daemon writes a PID file to the /data PVC but runs as PID 1
           # in the container, so after a restart it would see "PID 1 alive" and refuse
           # to start. With Recreate + 1 replica there is only ever one, so skip the guard.

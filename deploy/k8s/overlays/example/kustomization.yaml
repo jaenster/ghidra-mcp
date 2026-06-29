@@ -7,7 +7,7 @@ resources:
 # Pin to a concrete image tag in production (e.g. the built git SHA) and bump it from
 # your own GitOps tooling — ArgoCD Image Updater, or a `newTag` bump in your infra repo.
 images:
-  - name: ghcr.io/jaenster/ghidra-mcp-remote
+  - name: ghcr.io/jaenster/ghidra-mcp
     newTag: latest
 configMapGenerator:
   - name: ghidra-mcp-config
