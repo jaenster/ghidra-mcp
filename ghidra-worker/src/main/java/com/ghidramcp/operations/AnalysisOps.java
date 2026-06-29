@@ -1355,7 +1355,8 @@ public class AnalysisOps {
 
             // Create JumpTable override
             ArrayList<Address> destList = new ArrayList<>(caseAddrs);
-            JumpTable jt = new JumpTable(branchAddr, destList, true);
+            // Ghidra 12.1.2 added a trailing displayFormat arg; 0 = default (no format override).
+            JumpTable jt = new JumpTable(branchAddr, destList, true, 0);
             jt.writeOverride(func);
 
             // Rebuild function body to pick up the new cases
