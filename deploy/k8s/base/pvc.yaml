@@ -1,0 +1,12 @@
+# Per-instance app data: state.db (OAuth clients/tokens), the worker secret, and
+# uploaded/analyzed binaries + Ghidra projects. RWO — one daemon instance owns it.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ghidra-mcp-data
+spec:
+  accessModes: [ReadWriteOnce]
+  # storageClassName: longhorn   # set to your cluster's storage class
+  resources:
+    requests:
+      storage: 10Gi

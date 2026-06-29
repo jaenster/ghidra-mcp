@@ -1,0 +1,28 @@
+# Public HTTPS entrypoint for the MCP connector. The proxy annotations keep MCP's
+# SSE / Streamable-HTTP streams long-lived and unbuffered. Adjust the ingress class
+# and cert-manager issuer to your cluster.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ghidra-mcp
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [ghidra-mcp.example.com]
+      secretName: ghidra-mcp-tls
+  rules:
+    - host: ghidra-mcp.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ghidra-mcp
+                port:
+                  number: 80

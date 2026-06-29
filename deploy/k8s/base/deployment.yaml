@@ -1,0 +1,111 @@
+# The ghidra-mcp daemon (Node). It launches each Ghidra worker as its OWN pod
+# (GHIDRA_MCP_WORKER_BACKEND=k8s); workers connect back over the cluster network.
+# Single instance per overlay: state is sql.js (per-process) and the data PVC is
+# RWO, so the rollout strategy is Recreate.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ghidra-mcp
+spec:
+  replicas: 1
+  revisionHistoryLimit: 5
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: ghidra-mcp
+  template:
+    metadata:
+      labels:
+        app: ghidra-mcp
+    spec:
+      # Lets the daemon create/delete/watch worker pods (see rbac.yaml).
+      serviceAccountName: ghidra-mcp
+      # Worker pods INHERIT this pod's affinity, hostAliases and imagePullSecrets
+      # (the launcher reads the daemon's own pod spec). Use affinity to keep the
+      # heavy worker JVMs off your Ghidra Server node, for example:
+      #
+      # affinity:
+      #   podAntiAffinity:
+      #     preferredDuringSchedulingIgnoredDuringExecution:
+      #       - weight: 100
+      #         podAffinityTerm:
+      #           labelSelector: { matchLabels: { app: ghidra } }
+      #           namespaces: [ghidra]
+      #           topologyKey: kubernetes.io/hostname
+      #
+      # If your Ghidra Server advertises an RMI hostname that does not resolve from
+      # inside the cluster, pin it to the in-cluster Service ClusterIP so both the
+      # initial connect AND the RMI return-path land in-cluster:
+      #
+      # hostAliases:
+      #   - ip: "10.0.0.10"          # the Ghidra Server Service ClusterIP
+      #     hostnames: ["ghidra.example.com"]
+      imagePullSecrets:
+        - name: ghcr               # docker-registry secret for ghcr.io (if private)
+      containers:
+        - name: ghidra-mcp
+          image: ghcr.io/jaenster/ghidra-mcp-remote:latest
+          # --force: the daemon writes a PID file to the /data PVC but runs as PID 1
+          # in the container, so after a restart it would see "PID 1 alive" and refuse
+          # to start. With Recreate + 1 replica there is only ever one, so skip the guard.
+          command: ["node", "packages/cli/dist/index.js", "start", "-p", "8432", "-f", "--force"]
+          ports:
+            - containerPort: 8432
+          env:
+            # Downward API: the launcher needs its own pod name/uid (ownerReferences, so
+            # worker pods are GC'd if the daemon dies) and namespace (where to create them).
+            - name: GHIDRA_MCP_POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - name: GHIDRA_MCP_POD_UID
+              valueFrom: { fieldRef: { fieldPath: metadata.uid } }
+            - name: GHIDRA_MCP_NAMESPACE
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+          envFrom:
+            # Non-secret per-instance config (public URL, server host, memory, OIDC issuer…).
+            - configMapRef:
+                name: ghidra-mcp-config
+            # GHIDRA_MCP_AUTH_SECRET (+ optionally GHIDRA_MCP_OIDC_CLIENT_SECRET).
+            - secretRef:
+                name: ghidra-mcp-auth
+            # GHIDRA_SERVER_USER + GHIDRA_SERVER_PASSWORD — the credentials a worker uses
+            # to authenticate to the shared Ghidra Server. optional=true so the daemon
+            # still starts before the secret exists.
+            - secretRef:
+                name: ghidra-mcp-server
+                optional: true
+            # GHIDRA_MCP_WORKER_SECRET — shared worker control-plane secret. The daemon
+            # AND every worker pod must read the SAME value (workers get it via secretKeyRef).
+            - secretRef:
+                name: ghidra-mcp-worker
+                optional: true
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          # Generous timeouts: the single-threaded Node daemon can stall briefly under GC
+          # or heavy worker results; a tight probe would false-positive and liveness-kill
+          # the pod mid-session. Allow ~2min of unresponsiveness.
+          readinessProbe:
+            httpGet: { path: /health, port: 8432 }
+            initialDelaySeconds: 15
+            periodSeconds: 15
+            timeoutSeconds: 8
+            failureThreshold: 6
+          livenessProbe:
+            httpGet: { path: /health, port: 8432 }
+            initialDelaySeconds: 45
+            periodSeconds: 20
+            timeoutSeconds: 10
+            failureThreshold: 6
+          resources:
+            # Worker JVMs run in their OWN pods (each with its own memory limit), so the
+            # daemon pod is just the Node process + sql.js state — no JVMs in here.
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 768Mi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: ghidra-mcp-data

@@ -1,0 +1,14 @@
+# In-cluster Service. Worker pods call back to this DNS name
+# (GHIDRA_MCP_WORKER_DAEMON_URL), and the Ingress routes external MCP traffic here.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ghidra-mcp
+spec:
+  type: ClusterIP
+  selector:
+    app: ghidra-mcp
+  ports:
+    - port: 80
+      targetPort: 8432
+      protocol: TCP

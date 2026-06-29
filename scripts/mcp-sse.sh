@@ -5,9 +5,11 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 DAEMON_PORT=8432
-MCP_PROXY="/Users/user/Library/Python/3.13/bin/mcp-proxy"
+# Resolve mcp-proxy from PATH; override with MCP_PROXY=/path/to/mcp-proxy if needed.
+MCP_PROXY="${MCP_PROXY:-$(command -v mcp-proxy)}"
 
-export GHIDRA_HOME="$PROJECT_ROOT/ghidra_12.0.2_PUBLIC"
+# Point at your local Ghidra install (scripts/install-ghidra.sh drops it under the repo).
+export GHIDRA_HOME="${GHIDRA_HOME:-$(echo "$PROJECT_ROOT"/ghidra_*_PUBLIC)}"
 
 # Check if daemon is running
 if ! curl -s "http://localhost:$DAEMON_PORT/health" >/dev/null 2>&1; then

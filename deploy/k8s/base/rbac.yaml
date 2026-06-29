@@ -1,0 +1,28 @@
+# The daemon launches each Ghidra worker as its own pod (GHIDRA_MCP_WORKER_BACKEND=k8s),
+# so it needs to create/delete/watch pods in its own namespace. Scoped to a namespaced
+# Role (not ClusterRole) — no cluster-wide reach.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ghidra-mcp
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ghidra-mcp-worker
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "delete", "get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ghidra-mcp-worker
+subjects:
+  - kind: ServiceAccount
+    name: ghidra-mcp
+roleRef:
+  kind: Role
+  name: ghidra-mcp-worker
+  apiGroup: rbac.authorization.k8s.io

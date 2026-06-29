@@ -1,7 +1,9 @@
 #!/bin/bash
 set -e
 
-export GHIDRA_HOME="${GHIDRA_HOME:-/Users/user/code/claude/ghidra-mcp/ghidra_12.0.2_PUBLIC}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+export GHIDRA_HOME="${GHIDRA_HOME:-$(echo "$PROJECT_ROOT"/ghidra_*_PUBLIC)}"
 WORKER_JAR="ghidra-worker/build/libs/ghidra-worker-1.0.0.jar"
 
 CP="$WORKER_JAR"
