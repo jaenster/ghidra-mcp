@@ -1,5 +1,7 @@
 # ghidra-mcp
 
+[![Discord](https://img.shields.io/badge/Discord-join%20the%20chat-5865F2?logo=discord&logoColor=white)](https://discord.gg/MHK2Dg9)
+
 **Headless [Ghidra](https://ghidra-sre.org/) as an MCP server.** A single TypeScript
 daemon exposes Ghidra's reverse-engineering capabilities — decompilation, disassembly,
 cross-references, type/structure editing, call graphs, data-flow tracing, scripting and
