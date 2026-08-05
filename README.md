@@ -15,6 +15,8 @@ It runs two ways from the same codebase:
 - **Cloud-native** as an OAuth-secured **claude.ai connector**: a daemon pod that
   spawns one Ghidra worker pod per session and talks to a **shared Ghidra Server**.
 
+If this saves you time, you can [sponsor the work](https://github.com/sponsors/jaenster).
+
 ## Concept
 
 Ghidra is a heavyweight desktop reverse-engineering suite. ghidra-mcp runs it
