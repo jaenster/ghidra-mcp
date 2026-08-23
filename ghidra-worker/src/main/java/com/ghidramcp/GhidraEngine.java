@@ -189,12 +189,11 @@ public class GhidraEngine {
         return functionOps.findCallPath(fromSpec, toSpec, maxDepth);
     }
 
-    public List<FunctionListEntry> findFunctionsMatching(List<String> calls, List<String> notCalls,
-                                                     String referencesString, String inNamespace,
-                                                     int sizeMin, int sizeMax, int limit) {
-        return functionOps.findFunctionsMatching(calls, notCalls, referencesString, inNamespace, sizeMin, sizeMax, limit);
+    public FindFunctionsResult findFunctionsMatching(List<String> calls, List<String> notCalls,
+                                        String referencesString, String inNamespace,
+                                        int sizeMin, int sizeMax, int offset, int limit) {
+        return functionOps.findFunctionsMatching(calls, notCalls, referencesString, inNamespace, sizeMin, sizeMax, offset, limit);
     }
-
     public FunctionInfo createFunction(String addressStr, String name) throws Exception {
         return functionOps.createFunction(addressStr, name);
     }
@@ -812,6 +811,14 @@ public class GhidraEngine {
         public String fieldName;    // identify by existing name
         public String newName;      // rename to this
         public String newDataType;  // retype to this
+    }
+
+    public static class FindFunctionsResult {
+        public java.util.List<FunctionListEntry> functions = new java.util.ArrayList<>();
+        public int total;
+        public int offset;
+        public int limit;
+        public boolean hasMore;
     }
 
     public static class StructureResult {

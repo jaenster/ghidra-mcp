@@ -416,6 +416,24 @@ public class MemoryOps {
                 dataInfo.put("value", data.getValue().toString());
             }
             result.put("data", dataInfo);
+        } else {
+            // Inside a larger definition rather than at its start — say which one and where,
+            // so the answer here matches what the symbol listing shows for this address.
+            Data container = program.getListing().getDataContaining(address);
+            if (container != null) {
+                Map<String, Object> containerInfo = new LinkedHashMap<>();
+                containerInfo.put("type", container.getDataType().getName());
+                containerInfo.put("size", container.getLength());
+                containerInfo.put("address", container.getAddress().toString());
+                long delta = address.subtract(container.getAddress());
+                containerInfo.put("offset", delta);
+                Data component = container.getComponentContaining((int) delta);
+                if (component != null) {
+                    containerInfo.put("field", component.getFieldName());
+                    containerInfo.put("fieldType", component.getDataType().getName());
+                }
+                result.put("containedIn", containerInfo);
+            }
         }
 
         // Segment info
@@ -519,17 +537,22 @@ public class MemoryOps {
         Listing listing = program.getListing();
         List<Map<String, Object>> symbols = new ArrayList<>();
 
-        Set<String> seen = new HashSet<>();
+        // One entry per address. Several names at one address are the same thing under
+        // different labels — MSVC RTTI produces a flat "struct_X_RTTI_*" label alongside the
+        // namespaced "X::RTTI_*" — so the extra names are folded in as aliases rather than
+        // repeated as separate rows.
+        Map<String, Map<String, Object>> byAddress = new LinkedHashMap<>();
         SymbolIterator iter = symTable.getSymbolIterator(address.add(1), true);
         while (iter.hasNext() && symbols.size() < count) {
             Symbol sym = iter.next();
             if (sym.isDynamic()) continue;
 
             Address symAddr = sym.getAddress();
-            // Dedupe by address+name: RTTI descriptors produce a flat LABEL and a
-            // namespaced symbol at the same address — keep only the first seen.
-            String dedupeKey = symAddr.toString() + "|" + sym.getName();
-            if (!seen.add(dedupeKey)) continue;
+            Map<String, Object> existing = byAddress.get(symAddr.toString());
+            if (existing != null) {
+                addAlias(existing, sym);
+                continue;
+            }
 
             Map<String, Object> info = new LinkedHashMap<>();
             info.put("address", symAddr.toString());
@@ -566,10 +589,47 @@ public class MemoryOps {
             }
             info.put("xrefCount", xrefCount);
 
+            byAddress.put(symAddr.toString(), info);
             symbols.add(info);
         }
 
         return symbols;
+    }
+
+    /**
+     * Record an additional name for an address already listed. The namespaced name is the
+     * more useful one, so it takes over as the entry's name and the flat label becomes the
+     * alias rather than the other way round.
+     */
+    @SuppressWarnings("unchecked")
+    private void addAlias(Map<String, Object> entry, Symbol sym) {
+        String current = (String) entry.get("name");
+        String currentFull = (String) entry.get("fullName");
+        String candidateFull = sym.getName(true);
+        boolean candidateIsNamespaced = candidateFull.contains("::");
+        boolean currentIsNamespaced = currentFull != null && currentFull.contains("::");
+
+        String demoted;
+        if (candidateIsNamespaced && !currentIsNamespaced) {
+            entry.put("name", sym.getName());
+            entry.put("fullName", candidateFull);
+            Namespace ns = sym.getParentNamespace();
+            if (ns != null && !ns.isGlobal()) {
+                entry.put("namespace", ns.getName(true));
+            }
+            demoted = current;
+        } else {
+            demoted = sym.getName();
+        }
+
+        List<String> aliases = (List<String>) entry.get("aliases");
+        if (aliases == null) {
+            aliases = new ArrayList<>();
+            entry.put("aliases", aliases);
+        }
+        if (demoted != null && !aliases.contains(demoted)) {
+            aliases.add(demoted);
+        }
     }
 
     /**

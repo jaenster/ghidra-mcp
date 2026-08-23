@@ -595,6 +595,7 @@ export interface FindFunctionsMatchingCommand extends BaseCommand {
     inNamespace?: string;
     sizeMin?: number;
     sizeMax?: number;
+    offset?: number;
     limit?: number;
   };
 }

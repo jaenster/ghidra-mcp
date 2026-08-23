@@ -987,18 +987,24 @@ public class FunctionOps {
     /**
      * Find functions that match compound criteria
      */
-    public List<GhidraEngine.FunctionListEntry> findFunctionsMatching(List<String> calls, List<String> notCalls,
+    public GhidraEngine.FindFunctionsResult findFunctionsMatching(List<String> calls, List<String> notCalls,
                                                                  String referencesString, String inNamespace,
-                                                                 int sizeMin, int sizeMax, int limit) {
+                                                                 int sizeMin, int sizeMax, int offset, int limit) {
         // Lightweight entries (name/address/signature/size) — NOT full FunctionInfo: a
         // broad match set with full params+locals (and, since #31, a decompile each) blows
         // the token limit and is slow. Callers get_function_info the few they want.
-        List<GhidraEngine.FunctionListEntry> matches = new ArrayList<>();
+        //
+        // The scan continues past the requested window so `total` is the real number of
+        // matches: a broad query used to return `limit` rows with no way to tell whether
+        // that was all of them, and no way to ask for the next page.
+        GhidraEngine.FindFunctionsResult result = new GhidraEngine.FindFunctionsResult();
+        List<GhidraEngine.FunctionListEntry> matches = result.functions;
         FunctionManager funcMgr = ctx.getProgram().getFunctionManager();
         ReferenceManager refMgr = ctx.getProgram().getReferenceManager();
+        int seen = 0;
 
         Iterator<Function> funcIter = funcMgr.getFunctions(true);
-        while (funcIter.hasNext() && matches.size() < limit) {
+        while (funcIter.hasNext()) {
             Function func = funcIter.next();
 
             // Filter by namespace
@@ -1070,10 +1076,16 @@ public class FunctionOps {
                 if (!foundString) continue;
             }
 
+            result.total++;
+            if (seen++ < offset) continue;
+            if (matches.size() >= limit) continue;  // keep counting, stop collecting
             matches.add(this.getFunctionListEntry(func));
         }
 
-        return matches;
+        result.offset = offset;
+        result.limit = limit;
+        result.hasMore = offset + matches.size() < result.total;
+        return result;
     }
 
     // ==================== CREATE / DELETE ====================

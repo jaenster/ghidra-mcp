@@ -34,12 +34,12 @@ Worked top to bottom, one commit per item.
 
 **F. Smaller ones (issue 6)**
 - [ ] F1 `list_data_symbols` honours `dataType`
-- [ ] F2 `get_data_at_address` reports overlapping labels
-- [ ] F3 `get_symbol_after` deduplicates one-address aliases
+- [x] F2 `get_data_at_address` reports overlapping labels
+- [x] F3 `get_symbol_after` deduplicates one-address aliases
 - [ ] F4 `search type=decompiled` indexes local names / field-extract syntax
-- [ ] F5 `list_symbols type=LOCAL_VAR` returns function-scoped locals
+- [x] F5 `list_symbols type=LOCAL_VAR` returns function-scoped locals
 - [ ] F6 `get_function_info` stack-slot types agree with `decompile`
-- [ ] F7 `find_functions_matching` pages instead of blowing the token limit
+- [x] F7 `find_functions_matching` pages instead of blowing the token limit
 - [ ] F8 `delete_namespace` removes the empty shell
 
 **G. Sessions (issue 7)**

@@ -111,6 +111,20 @@ public class SymbolOps {
     /**
      * List all symbols with filtering.
      */
+    /**
+     * Symbol types as this API names them: Ghidra's display names ("Local Var") in the form
+     * the tool schema advertises.
+     */
+    private static final java.util.Set<String> KNOWN_SYMBOL_TYPES = java.util.Set.of(
+        "LABEL", "LIBRARY", "NAMESPACE", "CLASS", "FUNCTION",
+        "PARAMETER", "LOCAL_VAR", "GLOBAL_REGISTER_VAR", "GLOBAL"
+    );
+
+    /** "Local Var" / "local var" / "LOCAL_VAR" all become LOCAL_VAR. */
+    private static String canonicalSymbolType(String type) {
+        return type.trim().toUpperCase().replace(' ', '_');
+    }
+
     public List<GhidraEngine.SymbolInfo> listSymbols(int offset, int limit, String filter, String regex, String type) {
         Program program = ctx.getProgram();
         List<GhidraEngine.SymbolInfo> symbols = new ArrayList<>();
@@ -122,9 +136,17 @@ public class SymbolOps {
         int count = 0;
         int skipped = 0;
 
+        String wantedType = type != null ? canonicalSymbolType(type) : null;
+        if (wantedType != null && !KNOWN_SYMBOL_TYPES.contains(wantedType)) {
+            throw new IllegalArgumentException("Unknown symbol type \"" + type + "\". Valid: "
+                + String.join(", ", KNOWN_SYMBOL_TYPES));
+        }
+
         for (Symbol sym : symTable.getAllSymbols(true)) {
-            // Filter by type
-            if (type != null && !sym.getSymbolType().toString().equalsIgnoreCase(type)) {
+            // Filter by type. Ghidra's SymbolType prints a display name ("Local Var"), so
+            // compare on a canonical form — otherwise type=LOCAL_VAR silently matched nothing
+            // and read as "this program has no locals".
+            if (wantedType != null && !canonicalSymbolType(sym.getSymbolType().toString()).equals(wantedType)) {
                 continue;
             }
 
@@ -142,7 +164,7 @@ public class SymbolOps {
             GhidraEngine.SymbolInfo info = new GhidraEngine.SymbolInfo();
             info.name = sym.getName();
             info.address = sym.getAddress().toString();
-            info.type = sym.getSymbolType().toString();
+            info.type = canonicalSymbolType(sym.getSymbolType().toString());
             info.isPrimary = sym.isPrimary();
             info.isExternal = sym.isExternal();
 

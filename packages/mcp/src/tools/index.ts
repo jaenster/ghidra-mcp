@@ -909,7 +909,7 @@ export const navigationTools: ToolDefinition[] = [
       ...filterProps,
       type: {
         type: 'string',
-        enum: ['FUNCTION', 'LABEL', 'CLASS', 'NAMESPACE', 'PARAMETER', 'LOCAL_VAR', 'GLOBAL_VAR', 'EXTERNAL'],
+        enum: ['FUNCTION', 'LABEL', 'CLASS', 'NAMESPACE', 'PARAMETER', 'LOCAL_VAR', 'GLOBAL_REGISTER_VAR', 'GLOBAL', 'LIBRARY'],
         description: 'Filter by symbol type',
       },
     }
@@ -1154,7 +1154,9 @@ export const llmPowerTools: ToolDefinition[] = [
 
   defineTool(
     'find_functions_matching',
-    'Find functions that match compound criteria. Essential for finding related code patterns.',
+    'Find functions that match compound criteria. Essential for finding related code patterns. ' +
+    'Results are paged: total is the real number of matches (not just what was returned), and ' +
+    'hasMore says whether to ask for the next offset — a broad query no longer silently truncates.',
     {
       ...sessionIdProp,
       calls: {
@@ -1183,9 +1185,13 @@ export const llmPowerTools: ToolDefinition[] = [
         type: 'number',
         description: 'Maximum function size in bytes',
       },
+      offset: {
+        type: 'number',
+        description: 'Skip this many matches, for paging (default: 0)',
+      },
       limit: {
         type: 'number',
-        description: 'Maximum results (default: 50)',
+        description: 'Maximum results per page (default: 50)',
       },
     }
   ),

@@ -1290,6 +1290,7 @@ export class GhidraToolHandler {
             inNamespace: params.inNamespace as string | undefined,
             sizeMin: params.sizeMin as number | undefined,
             sizeMax: params.sizeMax as number | undefined,
+            offset: params.offset as number | undefined,
             limit: params.limit as number | undefined,
           },
           timeout,

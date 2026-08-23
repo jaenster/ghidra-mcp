@@ -1152,6 +1152,7 @@ public class CommandHandler {
         String inNamespace = getString(params, "inNamespace", null);
         int sizeMin = getInt(params, "sizeMin", -1);
         int sizeMax = getInt(params, "sizeMax", -1);
+        int offset = getInt(params, "offset", 0);
         int limit = getInt(params, "limit", 50);
         log.debug("find_functions_matching: ns=" + inNamespace + " refStr=" + referencesString +
             " calls=" + (callsArray != null ? callsArray.size() : 0) + " limit=" + limit);
@@ -1170,11 +1171,15 @@ public class CommandHandler {
             }
         }
 
-        List<GhidraEngine.FunctionListEntry> functions = engine.findFunctionsMatching(calls, notCalls, referencesString, inNamespace, sizeMin, sizeMax, limit);
+        GhidraEngine.FindFunctionsResult found = engine.findFunctionsMatching(
+            calls, notCalls, referencesString, inNamespace, sizeMin, sizeMax, offset, limit);
 
         JsonObject result = new JsonObject();
-        result.add("functions", gson.toJsonTree(functions));
-        result.addProperty("total", functions.size());
+        result.add("functions", gson.toJsonTree(found.functions));
+        result.addProperty("total", found.total);
+        result.addProperty("offset", found.offset);
+        result.addProperty("limit", found.limit);
+        result.addProperty("hasMore", found.hasMore);
         return result;
     }
 
