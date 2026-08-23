@@ -449,7 +449,6 @@ export async function createServer(options: ServerOptions): Promise<{
       createSession: (path, opts) => sessionManager.createSession(path, opts),
       closeSession: (id, force) => sessionManager.closeSession(id, force),
       getRepoSession: () => sessionManager.getRepoSession(),
-      getDefaultRepo: () => process.env.GHIDRA_SERVER_REPO,
       sendCommand: async (sessionId: string, command: WorkerCommand) => {
         commandLog?.recordStart(command.id, sessionId, command.command, command.params ?? {});
         try {

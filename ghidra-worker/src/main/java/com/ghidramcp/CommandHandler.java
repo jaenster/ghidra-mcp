@@ -47,6 +47,12 @@ public class CommandHandler {
             case "list_repos":
                 return handleListRepos();
 
+            case "create_repo":
+                return handleCreateRepo(params);
+
+            case "delete_repo":
+                return handleDeleteRepo(params);
+
             case "import_program":
                 return handleImportProgram(params);
 
@@ -364,11 +370,24 @@ public class CommandHandler {
         return result;
     }
 
+    private JsonObject handleCreateRepo(JsonObject params) throws Exception {
+        String name = getString(params, "name", null);
+        if (name == null || name.isEmpty()) {
+            throw new IllegalArgumentException("name is required");
+        }
+        return engine.repo().createRepo(name);
+    }
+
+    private JsonObject handleDeleteRepo(JsonObject params) throws Exception {
+        String name = getString(params, "name", null);
+        if (name == null || name.isEmpty()) {
+            throw new IllegalArgumentException("name is required");
+        }
+        return engine.repo().deleteRepo(name, getBoolean(params, "force", false));
+    }
+
     private JsonObject handleImportProgram(JsonObject params) throws Exception {
         String repo = getString(params, "repo", null);
-        if (repo == null) {
-            throw new IllegalArgumentException("repo is required");
-        }
         List<com.ghidramcp.operations.RepoOps.ImportSpec> specs = new ArrayList<>();
         if (params.has("items") && params.get("items").isJsonArray()) {
             for (var el : params.getAsJsonArray("items")) {
@@ -377,6 +396,23 @@ public class CommandHandler {
         } else {
             specs.add(parseImportSpec(params));
         }
+        // A programPath names its repository first ("Diablo2Lod/windows/Game.exe"), which is
+        // the same form create_session and the listings use. An explicit repo overrides it.
+        for (com.ghidramcp.operations.RepoOps.ImportSpec spec : specs) {
+            String[] split = splitRepoPath(spec.programPath, repo);
+            if (repo == null) {
+                repo = split[0];
+            } else if (!repo.equals(split[0])) {
+                throw new IllegalArgumentException("All items in one import must target repo '"
+                    + repo + "', but " + spec.programPath + " targets '" + split[0] + "'");
+            }
+            spec.programPath = split[1];
+        }
+        if (repo == null) {
+            throw new IllegalArgumentException(
+                "No repository: give programPath as \"Repo/path/to/program\", or pass repo.");
+        }
+
         boolean analyze = getBoolean(params, "analyze", true);
         boolean overwrite = getBoolean(params, "overwrite", false);
         boolean wait = getBoolean(params, "wait", false);
@@ -407,22 +443,48 @@ public class CommandHandler {
     }
 
     private JsonObject handleDeleteProgram(JsonObject params) throws Exception {
-        String repo = getString(params, "repo", null);
         String programPath = getString(params, "programPath", null);
-        if (repo == null || programPath == null) {
-            throw new IllegalArgumentException("repo and programPath are required");
+        if (programPath == null) {
+            throw new IllegalArgumentException("programPath is required");
         }
-        return engine.repo().deleteProgram(repo, programPath);
+        String[] split = splitRepoPath(programPath, getString(params, "repo", null));
+        return engine.repo().deleteProgram(split[0], split[1]);
     }
 
     private JsonObject handleMoveProgram(JsonObject params) throws Exception {
-        String repo = getString(params, "repo", null);
         String from = getString(params, "from", null);
         String to = getString(params, "to", null);
-        if (repo == null || from == null || to == null) {
-            throw new IllegalArgumentException("repo, from and to are required");
+        if (from == null || to == null) {
+            throw new IllegalArgumentException("from and to are required");
         }
-        return engine.repo().moveProgram(repo, from, to);
+        String repo = getString(params, "repo", null);
+        String[] fromSplit = splitRepoPath(from, repo);
+        String[] toSplit = splitRepoPath(to, repo != null ? repo : fromSplit[0]);
+        if (!fromSplit[0].equals(toSplit[0])) {
+            throw new IllegalArgumentException("A move stays within one repository: "
+                + fromSplit[0] + " -> " + toSplit[0]);
+        }
+        return engine.repo().moveProgram(fromSplit[0], fromSplit[1], toSplit[1]);
+    }
+
+    /**
+     * Split "Repo/path/to/program" into its repository and the path within it. With an
+     * explicit repo the whole string is already the path within that repo.
+     */
+    private String[] splitRepoPath(String path, String explicitRepo) {
+        if (path == null) {
+            throw new IllegalArgumentException("A program path is required");
+        }
+        String trimmed = path.startsWith("/") ? path.substring(1) : path;
+        if (explicitRepo != null && !explicitRepo.isEmpty()) {
+            return new String[] { explicitRepo, "/" + trimmed };
+        }
+        int slash = trimmed.indexOf('/');
+        if (slash <= 0 || slash == trimmed.length() - 1) {
+            throw new IllegalArgumentException("Program path must name its repository first, as "
+                + "\"Repo/path/to/program\" (got \"" + path + "\"). list_repos shows what is there.");
+        }
+        return new String[] { trimmed.substring(0, slash), trimmed.substring(slash) };
     }
 
     private JsonObject handleListFunctions(JsonObject params) {

@@ -19,9 +19,6 @@ export interface ToolHandlerContext {
   /** A worker connected to the Ghidra Server with nothing open, for repo-scoped tools. */
   getRepoSession?(): Promise<string>;
 
-  /** The repository the daemon is configured for, so clients need not name it. */
-  getDefaultRepo?(): string | undefined;
-
   // Send command to a session's worker
   sendCommand(
     sessionId: string,
@@ -463,14 +460,12 @@ export class GhidraToolHandler {
     // before any session exists — that is the whole point of being able to discover what
     // is on the server. Fall back to the daemon's repo worker.
     const REPO_TOOLS = new Set([
-      'list_repos', 'import_program', 'import_status', 'delete_program', 'move_program',
+      'list_repos', 'create_repo', 'delete_repo',
+      'import_program', 'import_status', 'delete_program', 'move_program',
     ]);
-    const repoScoped = REPO_TOOLS.has(toolName) || toolName === 'list_programs';
-    if (repoScoped && !args.repo && this.context.getDefaultRepo?.()) {
-      args = { ...args, repo: this.context.getDefaultRepo() };
-    }
-    const needsRepoWorker = REPO_TOOLS.has(toolName)
-      || (toolName === 'list_programs' && typeof args.repo === 'string');
+    // list_programs with no repo lists every repository, which is the useful default for
+    // discovery — so it too runs on the repo worker when there is no session.
+    const needsRepoWorker = REPO_TOOLS.has(toolName) || toolName === 'list_programs';
     if (!sessionId && needsRepoWorker) {
       if (!this.context.getRepoSession) {
         throw new Error('Repository access is not available in this context');
@@ -624,6 +619,25 @@ export class GhidraToolHandler {
             folder: params.folder as string | undefined,
             recursive: params.recursive as boolean | undefined,
             filter: params.filter as string | undefined,
+          },
+          timeout,
+        };
+
+      case 'create_repo':
+        return {
+          id,
+          command: 'create_repo',
+          params: { name: params.name as string },
+          timeout,
+        };
+
+      case 'delete_repo':
+        return {
+          id,
+          command: 'delete_repo',
+          params: {
+            name: params.name as string,
+            force: params.force as boolean | undefined,
           },
           timeout,
         };

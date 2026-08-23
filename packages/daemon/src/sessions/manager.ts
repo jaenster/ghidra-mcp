@@ -230,11 +230,10 @@ export class SessionManager {
    * The Ghidra Server this daemon speaks for. The server identity is owned by the daemon,
    * never by the client: clients name a program, not a host.
    */
-  private serverDefaults(): { host?: string; port: number; repo?: string; user: string } {
+  private serverDefaults(): { host?: string; port: number; user: string } {
     return {
       host: process.env.GHIDRA_SERVER_HOST,
       port: Number(process.env.GHIDRA_SERVER_PORT ?? '13100'),
-      repo: process.env.GHIDRA_SERVER_REPO,
       user: process.env.GHIDRA_SERVER_USER ?? 'mcp',
     };
   }
@@ -278,7 +277,7 @@ export class SessionManager {
   private async resolveTarget(
     target: string
   ): Promise<{ kind: 'server'; url: string } | { kind: 'localProject'; path: string }> {
-    const { host, port, repo: defaultRepo } = this.serverDefaults();
+    const { host, port } = this.serverDefaults();
 
     if (target.startsWith('ghidra://')) {
       const afterScheme = target.slice('ghidra://'.length);
@@ -326,8 +325,8 @@ export class SessionManager {
     if (!host) {
       throw new Error(
         `No Ghidra Server configured (GHIDRA_SERVER_HOST is unset), so "${target}" cannot be `
-        + 'resolved to a program. Point the daemon at a server with GHIDRA_SERVER_HOST and '
-        + 'GHIDRA_SERVER_REPO, or open a local .gpr project by path.'
+        + 'resolved to a program. Point the daemon at a server with GHIDRA_SERVER_HOST, or '
+        + 'open a local .gpr project by path.'
       );
     }
 
@@ -335,7 +334,7 @@ export class SessionManager {
       throw new Error(this.remotePathError(expanded));
     }
 
-    const { repo, programPath } = await this.resolveRepoPath(expanded, defaultRepo);
+    const { repo, programPath } = await this.resolveRepoPath(expanded);
     return { kind: 'server', url: `ghidra://${host}:${port}/${repo}${programPath}` };
   }
 
@@ -344,9 +343,9 @@ export class SessionManager {
    * at the two ways forward.
    */
   private remotePathError(localPath: string): string {
-    const { host, port, repo } = this.serverDefaults();
+    const { host, port } = this.serverDefaults();
     const server = host ? `${host}:${port}` : 'its configured Ghidra Server';
-    const example = repo ? `create_session program="/path/in/${repo}"` : 'create_session program="Repo/path"';
+    const example = 'create_session program="Repo/path/to/program"';
     return (
       `The worker runs on a different machine and cannot read your local filesystem, so `
       + `"${localPath}" is unreachable from it. It is connected to Ghidra Server ${server}. `
@@ -359,13 +358,11 @@ export class SessionManager {
    * Explain that a loose binary has nowhere durable to live once a repository exists.
    */
   private localBinaryError(localPath: string): string {
-    const { repo } = this.serverDefaults();
-    const target = repo ?? 'Repo';
     return (
       `"${localPath}" is a loose binary, which is not something a session can open. Importing `
       + 'it into a per-session project would give you a program that dies with the session — '
-      + 'nothing to commit to, nothing to reopen. Put it in the repository first: '
-      + `import_program url="…" programPath="/path/in/${target}", then open that with `
+      + 'nothing to commit to, nothing to reopen. Put it in a repository first: '
+      + 'import_program url="…" programPath="Repo/path/to/program", then open that with '
       + 'create_session. (A local .gpr project is still opened directly.)'
     );
   }
@@ -373,69 +370,50 @@ export class SessionManager {
   /**
    * Split a repository path into repo + program path.
    *
-   * "/windows/1.09d/D2Game.dll" is repo-relative to GHIDRA_SERVER_REPO; "Repo/a/b" names its
-   * repo explicitly. Where the server can be reached, the guess is checked against what is
-   * actually there, and a path that matches exactly one program by suffix is accepted — so
-   * the shorthand a listing suggests ("1.09d/D2Game.dll") opens without ceremony.
+   * A program is named the way the listings print it — its repository first:
+   * "Diablo2Lod/windows/1.09d/D2Game.dll". Nothing is implied from configuration, so what
+   * a client passes is exactly what it gets, and a path copied out of list_programs opens
+   * without editing.
+   *
+   * A path that names no repository (or names one that does not exist) is matched against
+   * every repository on the server, and accepted when exactly one program matches — that
+   * is the only place guessing happens, and an ambiguous guess is an error listing the
+   * candidates rather than a silent pick.
    */
   private async resolveRepoPath(
-    input: string,
-    defaultRepo?: string
+    input: string
   ): Promise<{ repo: string; programPath: string }> {
     const trimmed = input.replace(/^\/+/, '');
-    const explicitlyRelative = input.startsWith('/');
-    const [firstSegment, ...rest] = trimmed.split('/');
+    const slash = trimmed.indexOf('/');
+    const firstSegment = slash > 0 ? trimmed.slice(0, slash) : trimmed;
+    const rest = slash > 0 ? trimmed.slice(slash) : '';
 
-    const candidates: Array<{ repo: string; programPath: string }> = [];
-    if (defaultRepo) {
-      candidates.push({ repo: defaultRepo, programPath: `/${trimmed}` });
-    }
-    if (!explicitlyRelative && rest.length > 0 && firstSegment !== defaultRepo) {
-      candidates.push({ repo: firstSegment, programPath: `/${rest.join('/')}` });
-    }
-    // A leading slash with a configured repo is unambiguous by construction, so open it
-    // directly: consulting the server here would mean spawning the repo worker on every
-    // session creation, and the worker's own "not found in repository" is already clear.
-    if (explicitlyRelative && defaultRepo) {
-      return candidates[0];
-    }
-    if (candidates.length === 0) {
-      throw new Error(
-        `Cannot tell which repository "${input}" is in: no GHIDRA_SERVER_REPO is configured and `
-        + 'the path does not start with a repository name. Set GHIDRA_SERVER_REPO, or pass '
-        + '"Repo/path/to/program". Use list_repos to see what is available.'
-      );
-    }
-
-    // Verify against the server when we can. If discovery is unavailable (server down, no
-    // spare worker) fall back to the first guess rather than refusing to open anything.
-    let known: Array<{ repo: string; paths: string[] }>;
+    let repos: string[];
     try {
-      known = await Promise.all(candidates.map(async (c) => ({
-        repo: c.repo,
-        paths: await this.listRepoProgramPaths(c.repo),
-      })));
+      repos = await this.listRepos();
     } catch (err) {
-      console.warn(`[SessionManager] Could not verify program path against the server: `
-        + `${err instanceof Error ? err.message : String(err)}`);
-      return candidates[0];
-    }
-
-    for (const candidate of candidates) {
-      const entry = known.find((k) => k.repo === candidate.repo);
-      if (entry?.paths.includes(candidate.programPath)) {
-        return candidate;
+      // Discovery unavailable — take the path at face value rather than refusing to open.
+      if (!rest) {
+        throw new Error(
+          `"${input}" does not name a repository. Programs are addressed as `
+          + '"Repo/path/to/program"; list_repos shows what is on the server. '
+          + `(The server could not be reached to check: ${err instanceof Error ? err.message : String(err)})`
+        );
       }
+      return { repo: firstSegment, programPath: rest };
     }
 
-    // Nothing matched exactly — try a unique suffix match, which is what a half-remembered
-    // path from a listing looks like.
+    if (rest && repos.includes(firstSegment)) {
+      return { repo: firstSegment, programPath: rest };
+    }
+
+    // Not repo-qualified: fall back to matching the path across every repository.
     const suffix = `/${trimmed}`.toLowerCase();
     const matches: Array<{ repo: string; programPath: string }> = [];
-    for (const entry of known) {
-      for (const p of entry.paths) {
-        if (p.toLowerCase().endsWith(suffix)) {
-          matches.push({ repo: entry.repo, programPath: p });
+    for (const repo of repos) {
+      for (const programPath of await this.listRepoProgramPaths(repo)) {
+        if (programPath.toLowerCase().endsWith(suffix)) {
+          matches.push({ repo, programPath });
         }
       }
     }
@@ -446,13 +424,29 @@ export class SessionManager {
       const shown = matches.slice(0, 10).map((m) => `${m.repo}${m.programPath}`).join(', ');
       throw new Error(
         `"${input}" matches ${matches.length} programs: ${shown}`
-        + `${matches.length > 10 ? ', …' : ''}. Pass the full path.`
+        + `${matches.length > 10 ? ', …' : ''}. Pass the full "Repo/path" form.`
       );
     }
     throw new Error(
-      `No program "${input}" in ${candidates.map((c) => c.repo).join(' or ')}. `
-      + 'Use list_programs (it needs no session) to see what is there.'
+      `No program "${input}" on the server. Programs are addressed as "Repo/path/to/program"; `
+      + `repositories here are: ${repos.join(', ') || '(none)'}. `
+      + 'list_programs (no session needed) shows what is in them.'
     );
+  }
+
+  /** Repository names on the server, via the repo worker. */
+  async listRepos(): Promise<string[]> {
+    const sessionId = await this.getRepoSession();
+    const response = await this.sendCommand(sessionId, {
+      id: crypto.randomUUID(),
+      command: 'list_repos',
+      params: {},
+      timeout: 30_000,
+    });
+    if (!response.success) {
+      throw new Error(response.error?.message ?? 'Could not list repositories');
+    }
+    return (response.result as { repos?: string[] })?.repos ?? [];
   }
 
   /**

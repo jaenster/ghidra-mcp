@@ -7,6 +7,7 @@
 import * as child_process from 'node:child_process';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -250,16 +251,21 @@ async function waitForDaemon(port: number, timeout: number): Promise<void> {
 export async function cleanupAllDaemons(): Promise<void> {
   const daemons = Array.from(activeDaemons);
   await Promise.all(daemons.map((d) => d.stop().catch(() => {})));
+  cleanupScratchProjects();
 }
 
+// Disposable project copies handed out by getTestProgramPath, removed on exit.
+const scratchProjects = new Set<string>();
+
 /**
- * Get path to a test binary
- */
-/**
- * The .gpr project for a test binary — what a session actually opens.
+ * A private copy of the .gpr project for a test binary — what a session actually opens.
  *
  * Sessions no longer take a loose binary: it would be imported into a project thrown away
  * with the session. The fixtures are pre-analysed projects instead (npm run fixtures:ghidra).
+ *
+ * Each call copies the fixture, because a suite that renames or retypes something writes it
+ * into the project: sharing one copy let the modification suite's edits reach the analysis
+ * suite's expectations. The fixtures stay pristine and every suite starts from the same state.
  */
 export function getTestProgramPath(name: string): string {
   const projectPath = getGhidraProjectPath(name);
@@ -271,7 +277,27 @@ export function getTestProgramPath(name: string): string {
     );
   }
 
-  return `${projectPath}.gpr`;
+  const projectName = path.basename(projectPath);
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), `ghidra-mcp-e2e-${projectName}-`));
+  scratchProjects.add(scratch);
+
+  // A Ghidra project is the .gpr properties file plus its .rep data directory.
+  fs.copyFileSync(`${projectPath}.gpr`, path.join(scratch, `${projectName}.gpr`));
+  fs.cpSync(`${projectPath}.rep`, path.join(scratch, `${projectName}.rep`), { recursive: true });
+
+  return path.join(scratch, `${projectName}.gpr`);
+}
+
+/** Remove the project copies handed out during this run. */
+export function cleanupScratchProjects(): void {
+  for (const dir of scratchProjects) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // best effort — these live in the OS temp dir
+    }
+  }
+  scratchProjects.clear();
 }
 
 /**

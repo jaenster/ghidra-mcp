@@ -10,7 +10,7 @@ rather than re-discovered. The two at the top are the ones that cost the most ti
 Worked top to bottom, one commit per item.
 
 **A. Repo-first session model (issue 1 + drop the short-lived local-import path)**
-- [x] A1 `GHIDRA_SERVER_REPO` default repo; bare `program=` paths resolve against it
+- [x] A1 programs are named repository-first (`Diablo2Lod/windows/1.09d/D2Game.dll`), the same form the listings print; a path naming no repo is matched across all of them and accepted when unique. No hidden default repo — `create_repo`/`delete_repo` and all-repo `list_programs` make every repository first-class instead.
 - [x] A2 loose-binary sessions removed outright — a session opens a repo program or a local `.gpr`; the import path into a per-session project is gone from the worker too
 - [x] A3 local path gives the real reason, naming the host the worker is connected to
 - [x] A4 `list_repos` / `list_programs` work with no session

@@ -81,11 +81,66 @@ public class RepoOps {
     }
 
     /**
+     * Create a repository on the server. The creating user owns it, so subsequent imports
+     * and check-ins work without further administration.
+     */
+    public JsonObject createRepo(String name) throws Exception {
+        RepositoryServerAdapter server = requireServer();
+        for (String existing : server.getRepositoryNames()) {
+            if (existing.equals(name)) {
+                throw new IOException("Repository already exists: " + name);
+            }
+        }
+        RepositoryAdapter repo = server.createRepository(name);
+        repo.connect();
+
+        JsonObject out = new JsonObject();
+        out.addProperty("success", true);
+        out.addProperty("repo", name);
+        out.addProperty("owner", server.getUser());
+        ctx.getLog().info("Created repository '" + name + "'");
+        return out;
+    }
+
+    /**
+     * Delete a repository and everything in it. Refuses a non-empty one unless forced —
+     * this destroys every program and all of their version history.
+     */
+    public JsonObject deleteRepo(String name, boolean force) throws Exception {
+        RepositoryServerAdapter server = requireServer();
+        RepositoryAdapter repo = server.getRepository(name);
+        repo.connect();
+        if (!repo.isConnected()) {
+            throw new IOException("Repository not found: " + name);
+        }
+        int itemCount = repo.getItemCount();
+        if (itemCount > 0 && !force) {
+            throw new IOException("Refusing to delete repository '" + name + "': it holds "
+                + itemCount + " item(s), and deleting it destroys them and their whole version "
+                + "history. Pass force=true to delete it anyway.");
+        }
+        if (name.equals(ctx.getServerRepoName())) {
+            throw new IllegalStateException("This worker has '" + name + "' open; it cannot delete it");
+        }
+        server.deleteRepository(name);
+
+        JsonObject out = new JsonObject();
+        out.addProperty("success", true);
+        out.addProperty("deleted", name);
+        out.addProperty("itemsRemoved", itemCount);
+        ctx.getLog().info("Deleted repository '" + name + "' (" + itemCount + " items)");
+        return out;
+    }
+
+    /**
      * List the programs in a repository, walking it through the repository adapter so no
      * project needs to be open — this is what makes discovery possible before a session exists.
      */
     public JsonObject listRepoPrograms(String repoName, String folder, boolean recursive,
                                        String filter) throws Exception {
+        if (repoName == null || repoName.isEmpty()) {
+            return listAllRepoPrograms(folder, recursive, filter);
+        }
         RepositoryServerAdapter server = requireServer();
         RepositoryAdapter repo = server.getRepository(repoName);
         repo.connect();
@@ -106,6 +161,42 @@ public class RepoOps {
         }
         result.add("programs", arr);
         result.addProperty("total", found.size());
+        return result;
+    }
+
+    /**
+     * Every program on the server, each path prefixed with its repository — which is the
+     * form the tools take back, so a listing can be pasted straight into create_session.
+     */
+    private JsonObject listAllRepoPrograms(String folder, boolean recursive, String filter)
+            throws Exception {
+        RepositoryServerAdapter server = requireServer();
+        JsonArray all = new JsonArray();
+        JsonArray repos = new JsonArray();
+        int total = 0;
+
+        for (String name : server.getRepositoryNames()) {
+            repos.add(name);
+            try {
+                JsonObject one = listRepoPrograms(name, folder, recursive, filter);
+                for (var el : one.getAsJsonArray("programs")) {
+                    JsonObject entry = el.getAsJsonObject();
+                    // "Diablo2Lod/windows/1.09d/D2Game.dll" — repo-qualified, ready to open.
+                    entry.addProperty("repo", name);
+                    entry.addProperty("path", name + entry.get("path").getAsString());
+                    all.add(entry);
+                    total++;
+                }
+            } catch (Exception e) {
+                // A repository this user cannot read must not sink the whole listing.
+                ctx.getLog().warn("Skipping repository '" + name + "': " + e.getMessage());
+            }
+        }
+
+        JsonObject result = new JsonObject();
+        result.add("repos", repos);
+        result.add("programs", all);
+        result.addProperty("total", total);
         return result;
     }
 
@@ -293,12 +384,18 @@ public class RepoOps {
             if (!df.getName().equals(targetName)) {
                 df = df.setName(targetName);
             }
+            // Put it under version control straight away: an imported program that is only
+            // in the local project is invisible to everyone else and cannot be checked out,
+            // which is the whole reason for importing it into a shared repository.
+            // keepCheckedOut=false releases it, so any session can take its own checkout.
             df.addToVersionControl("Imported via ghidra-mcp", false, monitor);
 
             JsonObject out = new JsonObject();
-            out.addProperty("programPath", df.getPathname());
+            out.addProperty("programPath", repoQualified(df.getPathname()));
             out.addProperty("success", true);
             out.addProperty("analyzed", analyzed);
+            out.addProperty("versioned", df.isVersioned());
+            out.addProperty("version", df.getVersion());
             out.addProperty("languageId", program.getLanguageID().toString());
             out.addProperty("functions", program.getFunctionManager().getFunctionCount());
             String warnings = msgLog.toString();
@@ -402,7 +499,7 @@ public class RepoOps {
 
         JsonObject out = new JsonObject();
         out.addProperty("success", true);
-        out.addProperty("deleted", path);
+        out.addProperty("deleted", repoQualified(path));
         return out;
     }
 
@@ -450,8 +547,8 @@ public class RepoOps {
 
         JsonObject out = new JsonObject();
         out.addProperty("success", true);
-        out.addProperty("from", from);
-        out.addProperty("to", df.getPathname());
+        out.addProperty("from", repoQualified(from));
+        out.addProperty("to", repoQualified(df.getPathname()));
         return out;
     }
 
@@ -485,6 +582,12 @@ public class RepoOps {
             throw new IOException("Not connected to a Ghidra Server");
         }
         return server;
+    }
+
+    /** "Diablo2Lod/windows/Game.exe" — the form every tool takes back. */
+    private String repoQualified(String pathname) {
+        String repo = ctx.getServerRepoName();
+        return repo != null ? repo + pathname : pathname;
     }
 
     private String workerLocation() {

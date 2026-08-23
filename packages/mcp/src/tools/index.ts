@@ -97,9 +97,9 @@ export const sessionTools: ToolDefinition[] = [
   defineTool(
     'create_session',
     'Open a program from the Ghidra Server and start a session on it. ' +
-    'Name the program by its path in the repository — "/windows/1.09d/D2Game.dll" is relative to the ' +
-    'configured repository, "Repo/windows/1.09d/D2Game.dll" names the repository explicitly, and a path ' +
-    'that matches exactly one program (e.g. "1.09d/D2Game.dll") is accepted as shorthand. ' +
+    'A program is named repository-first, exactly as list_programs prints it: ' +
+    '"Diablo2Lod/windows/1.09d/D2Game.dll". A path that names no repository is matched across all ' +
+    'of them and accepted when exactly one program matches. ' +
     'Use list_repos and list_programs (neither needs a session) to see what is available. ' +
     'A full ghidra://[user:password@]host[:port]/repo/program/path URL opens a program on a different ' +
     'server; the port defaults to 13100. ' +
@@ -107,7 +107,7 @@ export const sessionTools: ToolDefinition[] = [
     {
       program: {
         type: 'string',
-        description: 'Program path in the repository (e.g. "/windows/1.09d/D2Game.dll" or "Repo/windows/1.09d/D2Game.dll")',
+        description: 'Repository-first program path, e.g. "Diablo2Lod/windows/1.09d/D2Game.dll"',
       },
       binaryPath: {
         type: 'string',
@@ -399,15 +399,47 @@ export const multiProgramTools: ToolDefinition[] = [
   ),
 
   defineTool(
+    'create_repo',
+    'Create a repository on the Ghidra Server. The connecting user owns it, so imports and ' +
+    'check-ins into it work straight away.',
+    {
+      ...sessionIdProp,
+      name: {
+        type: 'string',
+        description: 'Repository name',
+      },
+    },
+    ['name']
+  ),
+
+  defineTool(
+    'delete_repo',
+    'Delete a repository from the Ghidra Server. Refuses a repository that still holds programs ' +
+    'unless force is set — deleting it destroys every program in it and their whole version history.',
+    {
+      ...sessionIdProp,
+      name: {
+        type: 'string',
+        description: 'Repository name',
+      },
+      force: {
+        type: 'boolean',
+        description: 'Delete even when the repository still holds programs, destroying them (default: false)',
+      },
+    },
+    ['name']
+  ),
+
+  defineTool(
     'list_programs',
-    'List programs. With a repo (or with a repository configured on the daemon) this reads the ' +
-    'Ghidra Server directly and needs no session, so it works before any program is open. ' +
-    'Without one it lists the programs in the session\'s open project and shows which are loaded.',
+    'List programs on the Ghidra Server. Needs no session, so it works before anything is open. ' +
+    'With no repo it lists every repository, each path repository-first ' +
+    '("Diablo2Lod/windows/1.09d/D2Game.dll") so it can be handed straight to create_session.',
     {
       ...sessionIdProp,
       repo: {
         type: 'string',
-        description: 'Repository to list (defaults to the daemon\'s configured repository)',
+        description: 'Repository to list (omit to list every repository on the server)',
       },
       folder: {
         type: 'string',
@@ -429,13 +461,15 @@ export const multiProgramTools: ToolDefinition[] = [
     'Import one or more binaries into a Ghidra Server repository, so they can then be opened ' +
     'with create_session. The WORKER fetches the bytes, so give it a url it can reach (or a ' +
     'localPath on the worker host, or inline bytesBase64) — the worker cannot read the client\'s disk. ' +
+    'programPath names its repository first, the same form everything else uses: ' +
+    '"Diablo2Lod/windows/1.09d/Game.exe". Create the repository with create_repo if it is new. ' +
     'Analysis is slow, so the import runs as a background job: it returns a jobId immediately, ' +
     'which import_status polls. Pass items to import many in one call.',
     {
       ...sessionIdProp,
       repo: {
         type: 'string',
-        description: 'Target repository (defaults to the daemon\'s configured repository)',
+        description: 'Target repository, if you would rather not put it in programPath',
       },
       url: {
         type: 'string',
@@ -451,7 +485,7 @@ export const multiProgramTools: ToolDefinition[] = [
       },
       programPath: {
         type: 'string',
-        description: 'Where it lands in the repository, e.g. "/windows/1.09d/Game.exe"',
+        description: 'Where it lands, repository first: "Diablo2Lod/windows/1.09d/Game.exe"',
       },
       processor: {
         type: 'string',
@@ -514,11 +548,11 @@ export const multiProgramTools: ToolDefinition[] = [
       ...sessionIdProp,
       repo: {
         type: 'string',
-        description: 'Repository (defaults to the daemon\'s configured repository)',
+        description: 'Repository, if you would rather not put it in programPath',
       },
       programPath: {
         type: 'string',
-        description: 'Program to delete, e.g. "/windows/1.09d/Game.exe"',
+        description: 'Program to delete, repository first: "Diablo2Lod/windows/1.09d/Game.exe"',
       },
     },
     ['programPath']
@@ -527,20 +561,20 @@ export const multiProgramTools: ToolDefinition[] = [
   defineTool(
     'move_program',
     'Move or rename a program within a Ghidra Server repository — for fixing an import that landed ' +
-    'in the wrong place. Refuses to move a program a session has open.',
+    'in the wrong place. Both paths name the same repository. Refuses to move a program a session has open.',
     {
       ...sessionIdProp,
       repo: {
         type: 'string',
-        description: 'Repository (defaults to the daemon\'s configured repository)',
+        description: 'Repository, if you would rather not put it in the paths',
       },
       from: {
         type: 'string',
-        description: 'Current program path',
+        description: 'Current path, repository first: "Diablo2Lod/windows/Game.exe"',
       },
       to: {
         type: 'string',
-        description: 'New program path (folders are created as needed)',
+        description: 'New path, same repository (folders are created as needed)',
       },
     },
     ['from', 'to']

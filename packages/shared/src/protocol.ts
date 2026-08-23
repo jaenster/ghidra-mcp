@@ -140,6 +140,9 @@ export type WorkerCommand =
   // Multi-program commands
   | ListProgramsCommand
   // Repository commands
+  | ListReposCommand
+  | CreateRepoCommand
+  | DeleteRepoCommand
   | ImportProgramCommand
   | ImportStatusCommand
   | DeleteProgramCommand
@@ -1025,6 +1028,26 @@ export interface ImportSpecParams {
   compilerSpec?: string;
 }
 
+export interface ListReposCommand extends BaseCommand {
+  command: 'list_repos';
+  params: Record<string, never>;
+}
+
+export interface CreateRepoCommand extends BaseCommand {
+  command: 'create_repo';
+  params: {
+    name: string;
+  };
+}
+
+export interface DeleteRepoCommand extends BaseCommand {
+  command: 'delete_repo';
+  params: {
+    name: string;
+    force?: boolean;
+  };
+}
+
 export interface ImportProgramCommand extends BaseCommand {
   command: 'import_program';
   params: {
@@ -1054,6 +1077,7 @@ export interface ImportStatusCommand extends BaseCommand {
 export interface DeleteProgramCommand extends BaseCommand {
   command: 'delete_program';
   params: {
+    /** Optional override; normally the repository is the first segment of programPath. */
     repo?: string;
     programPath: string;
   };
