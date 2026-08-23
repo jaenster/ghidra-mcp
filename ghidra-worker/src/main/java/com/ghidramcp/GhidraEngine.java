@@ -804,8 +804,9 @@ public class GhidraEngine {
 
     public static class StructField {
         public String name;
-        public String dataType;
+        public String dataType;   // "int", "char[8]", or C bitfield syntax "int:3"
         public int offset = -1;
+        public int bitOffset = -1;  // bitfields only: position within the storage unit at offset
         public String comment;
         // updateFields-specific: identify field and apply partial updates
         public String fieldName;    // identify by existing name

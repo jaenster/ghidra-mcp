@@ -30,7 +30,7 @@ Worked top to bottom, one commit per item.
 - [x] D2 accept the convention (in the signature and as its own argument)
 
 **E. Types (issue 5)**
-- [ ] E1 `update_structure` bitfield members
+- [x] E1 `update_structure` bitfield members
 
 **F. Smaller ones (issue 6)**
 - [ ] F1 `list_data_symbols` honours `dataType`

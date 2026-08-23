@@ -540,8 +540,11 @@ export interface CreateStructureCommand extends BaseCommand {
     name: string;
     fields: Array<{
       name: string;
+      /** Type name, or C bitfield syntax ("int:3"). */
       dataType: string;
       offset?: number;
+      /** Bitfields only: bit position within the storage unit at offset. */
+      bitOffset?: number;
       comment?: string;
     }>;
     category?: string;
@@ -878,8 +881,11 @@ export interface UpdateStructureCommand extends BaseCommand {
     operation: 'replaceAll' | 'updateFields' | 'insertField' | 'deleteField' | 'replace' | 'addField' | 'removeField';
     fields?: Array<{
       name?: string;
+      /** Type name, or C bitfield syntax ("int:3"). */
       dataType?: string;
       offset?: number;
+      /** Bitfields only: bit position within the storage unit at offset. */
+      bitOffset?: number;
       comment?: string;
       // updateFields-specific: identify field and apply partial updates
       fieldName?: string;   // identify by existing name

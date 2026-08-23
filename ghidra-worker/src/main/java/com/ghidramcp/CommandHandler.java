@@ -767,6 +767,7 @@ public class CommandHandler {
             field.name = getString(fieldObj, "name", "field_" + i);
             field.dataType = getString(fieldObj, "dataType", "undefined");
             field.offset = getInt(fieldObj, "offset", -1);
+            field.bitOffset = getInt(fieldObj, "bitOffset", -1);
             field.comment = getString(fieldObj, "comment", null);
             fields.add(field);
         }
@@ -1504,6 +1505,7 @@ public class CommandHandler {
                 field.name = getString(fieldObj, "name", null);
                 field.dataType = getString(fieldObj, "dataType", null);
                 field.offset = getInt(fieldObj, "offset", -1);
+                field.bitOffset = getInt(fieldObj, "bitOffset", -1);
                 field.comment = getString(fieldObj, "comment", null);
                 // updateFields-specific params
                 field.fieldName = getString(fieldObj, "fieldName", null);

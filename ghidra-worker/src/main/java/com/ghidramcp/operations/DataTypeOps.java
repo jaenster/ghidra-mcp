@@ -214,7 +214,8 @@ public class DataTypeOps {
             int maxSize = 0;
             for (GhidraEngine.StructField field : fields) {
                 if (field.offset >= 0) {
-                    DataType fieldDt = ctx.resolveDataType(field.dataType);
+                    BitFieldSpec bits = parseBitField(field.dataType);
+                    DataType fieldDt = bits != null ? bits.base : ctx.resolveDataType(field.dataType);
                     int endOffset = field.offset + fieldDt.getLength();
                     if (endOffset > maxOffset + maxSize) {
                         maxOffset = field.offset;
@@ -229,7 +230,13 @@ public class DataTypeOps {
             StructureDataType struct = new StructureDataType(catPath, name, structSize, dtm);
 
             // Add fields
+            java.util.Map<Integer, Integer> bitCursor = new java.util.HashMap<>();
             for (GhidraEngine.StructField field : fields) {
+                BitFieldSpec bits = parseBitField(field.dataType);
+                if (bits != null) {
+                    placeBitField(struct, field, bits, bitCursor, true);
+                    continue;
+                }
                 DataType fieldDt = ctx.resolveDataType(field.dataType);
                 if (field.offset >= 0) {
                     struct.replaceAtOffset(field.offset, fieldDt, fieldDt.getLength(), field.name, field.comment);
@@ -339,7 +346,13 @@ public class DataTypeOps {
                     // Clear and replace all fields
                     struct.deleteAll();
                     if (fields != null) {
+                        java.util.Map<Integer, Integer> bitCursor = new java.util.HashMap<>();
                         for (GhidraEngine.StructField field : fields) {
+                            BitFieldSpec bits = parseBitField(field.dataType);
+                            if (bits != null) {
+                                placeBitField(struct, field, bits, bitCursor, false);
+                                continue;
+                            }
                             DataType fieldDt = ctx.resolveDataType(field.dataType);
                             if (field.offset >= 0) {
                                 struct.insertAtOffset(field.offset, fieldDt, fieldDt.getLength(), field.name, field.comment);
@@ -398,7 +411,13 @@ public class DataTypeOps {
                 case "insertField": {
                     // Add new fields
                     if (fields != null) {
+                        java.util.Map<Integer, Integer> bitCursor = new java.util.HashMap<>();
                         for (GhidraEngine.StructField field : fields) {
+                            BitFieldSpec bits = parseBitField(field.dataType);
+                            if (bits != null) {
+                                placeBitField(struct, field, bits, bitCursor, true);
+                                continue;
+                            }
                             DataType fieldDt = ctx.resolveDataType(field.dataType);
                             if (field.offset >= 0) {
                                 struct.insertAtOffset(field.offset, fieldDt, fieldDt.getLength(), field.name, field.comment);
@@ -439,6 +458,91 @@ public class DataTypeOps {
         } catch (Exception e) {
             program.endTransaction(txId, false);
             throw e;
+        }
+    }
+
+    // ==================== BITFIELDS ====================
+
+    /**
+     * A member written as "int:3" — a base type plus a width in bits.
+     */
+    private static final class BitFieldSpec {
+        DataType base;
+        int bitSize;
+    }
+
+    /**
+     * Recognise C bitfield syntax in a field's dataType. Returns null for an ordinary type.
+     * Only a trailing ":<digits>" counts, so namespaced type names ("Foo::Bar") are safe.
+     */
+    private BitFieldSpec parseBitField(String dataType) throws Exception {
+        if (dataType == null) {
+            return null;
+        }
+        int colon = dataType.lastIndexOf(':');
+        if (colon <= 0 || colon == dataType.length() - 1 || dataType.charAt(colon - 1) == ':') {
+            return null;
+        }
+        String widthPart = dataType.substring(colon + 1).trim();
+        if (!widthPart.matches("\\d+")) {
+            return null;
+        }
+        BitFieldSpec spec = new BitFieldSpec();
+        spec.base = ctx.resolveDataType(dataType.substring(0, colon).trim());
+        spec.bitSize = Integer.parseInt(widthPart);
+        int capacity = spec.base.getLength() * 8;
+        if (spec.bitSize < 1 || spec.bitSize > capacity) {
+            throw new Exception("Bitfield width " + spec.bitSize + " does not fit in "
+                + spec.base.getName() + " (" + capacity + " bits): " + dataType);
+        }
+        return spec;
+    }
+
+    /**
+     * Place a bitfield member.
+     *
+     * At an explicit offset, consecutive bitfields sharing that offset stack from the least
+     * significant bit up, which is how a C compiler lays them out — so "int:1" members
+     * declared in order end up in one storage unit instead of scattered into separate bytes.
+     * An explicit bitOffset overrides the running position. Without an offset the member is
+     * appended, which is what a packed structure wants.
+     */
+    private void placeBitField(Structure struct, GhidraEngine.StructField field, BitFieldSpec spec,
+                               java.util.Map<Integer, Integer> bitCursor, boolean replaceExisting)
+            throws Exception {
+        if (field.offset < 0) {
+            struct.addBitField(spec.base, spec.bitSize, field.name, field.comment);
+            return;
+        }
+        int capacity = spec.base.getLength() * 8;
+        int bitOffset = field.bitOffset >= 0
+            ? field.bitOffset
+            : bitCursor.getOrDefault(field.offset, 0);
+        if (bitOffset + spec.bitSize > capacity) {
+            throw new Exception("Bitfields at offset " + field.offset + " overflow "
+                + spec.base.getName() + ": " + (bitOffset + spec.bitSize) + " bits used of "
+                + capacity + ". Start a new offset, or widen the base type.");
+        }
+        if (replaceExisting) {
+            // insertBitFieldAt inserts rather than overwrites, so make room first by clearing
+            // whatever undefined bytes occupy the storage unit.
+            clearRange(struct, field.offset, spec.base.getLength());
+        }
+        struct.insertBitFieldAt(field.offset, spec.base.getLength(), bitOffset, spec.base,
+                                spec.bitSize, field.name, field.comment);
+        bitCursor.put(field.offset, bitOffset + spec.bitSize);
+    }
+
+    /**
+     * Clear the components covering [offset, offset+length) so a bitfield storage unit can be
+     * inserted there without pushing the rest of the structure along.
+     */
+    private void clearRange(Structure struct, int offset, int length) {
+        for (int i = offset + length - 1; i >= offset; i--) {
+            DataTypeComponent comp = struct.getComponentContaining(i);
+            if (comp != null && !comp.getDataType().equals(DataType.DEFAULT)) {
+                struct.clearComponent(comp.getOrdinal());
+            }
         }
     }
 

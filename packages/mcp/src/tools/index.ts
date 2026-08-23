@@ -1451,7 +1451,8 @@ export const modificationTools: ToolDefinition[] = [
 
   defineTool(
     'create_structure',
-    'Create a new structure data type.',
+    'Create a new structure data type. Bitfield members are written as C does — dataType "int:3" — ' +
+    'and consecutive bitfields at one offset stack from the least significant bit up.',
     {
       ...sessionIdProp,
       name: {
@@ -1464,8 +1465,9 @@ export const modificationTools: ToolDefinition[] = [
           type: 'object',
           properties: {
             name: { type: 'string' },
-            dataType: { type: 'string' },
+            dataType: { type: 'string', description: 'Data type; C bitfield syntax "int:3" is understood' },
             offset: { type: 'number' },
+            bitOffset: { type: 'number', description: 'Bitfields only: bit position within the storage unit at offset' },
             comment: { type: 'string' },
           },
           required: ['name', 'dataType'],
@@ -2021,7 +2023,10 @@ export const modificationTools: ToolDefinition[] = [
     '- "updateFields": Surgical batch update — rename, retype, or comment specific fields by name or offset. All other fields preserved.\n' +
     '- "insertField": Insert new field(s), struct grows.\n' +
     '- "deleteField": Delete a field by name, struct shrinks.\n' +
-    'Deprecated aliases still work: "replace"→"replaceAll", "addField"→"insertField", "removeField"→"deleteField".',
+    'Deprecated aliases still work: "replace"→"replaceAll", "addField"→"insertField", "removeField"→"deleteField".\n' +
+    'Bitfields: give dataType as C does, "int:3" or "uint:1". Consecutive bitfields at the same offset ' +
+    'stack from the least significant bit up, so flag bits end up in one storage unit instead of ' +
+    'scattered into separate bytes; pass bitOffset to place one explicitly.',
     {
       ...sessionIdProp,
       name: {
@@ -2039,8 +2044,9 @@ export const modificationTools: ToolDefinition[] = [
           type: 'object',
           properties: {
             name: { type: 'string', description: 'Field name (for replaceAll/insertField)' },
-            dataType: { type: 'string', description: 'Data type (for replaceAll/insertField)' },
+            dataType: { type: 'string', description: 'Data type (for replaceAll/insertField). C bitfield syntax "int:3" is understood.' },
             offset: { type: 'number', description: 'Offset in struct' },
+            bitOffset: { type: 'number', description: 'Bitfields only: bit position within the storage unit at offset (default: packed after the previous bitfield there)' },
             comment: { type: 'string', description: 'Field comment' },
             fieldName: { type: 'string', description: 'Identify field by name (for updateFields)' },
             newName: { type: 'string', description: 'Rename field to this (for updateFields)' },

@@ -1230,6 +1230,7 @@ export class GhidraToolHandler {
               name: string;
               dataType: string;
               offset?: number;
+              bitOffset?: number;
               comment?: string;
             }>,
             category: params.category as string | undefined,
@@ -1478,6 +1479,7 @@ export class GhidraToolHandler {
               name?: string;
               dataType?: string;
               offset?: number;
+              bitOffset?: number;
               comment?: string;
               fieldName?: string;
               newName?: string;
