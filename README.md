@@ -90,9 +90,9 @@ concurrency scale with cluster capacity instead of a single pod's RAM.
 Cloud-native mode is built around a **collaborative [Ghidra Server](https://ghidra-sre.org/InstallationGuide.html#GhidraServer)**
 (the RMI repository server, ports 13100-13102) as the source of truth for programs:
 
-- Clients open a program by **repository path** (e.g. `MyRepo/path/to/binary.exe`); the
-  daemon prepends the configured `GHIDRA_SERVER_HOST:PORT`. Credentials always come from
-  the environment, never the URL.
+- Clients open a program by **repository path**; the daemon supplies the server identity
+  from `GHIDRA_SERVER_HOST:PORT`. Credentials always come from the environment, never the
+  URL.
 - Multiple workers (and human Ghidra GUI users) share the same repository, so analysis —
   renames, structs, comments, bookmarks — is committed back and persists across sessions.
 - The worker image's bundled Ghidra version **must match** the Ghidra Server version —
@@ -100,6 +100,45 @@ Cloud-native mode is built around a **collaborative [Ghidra Server](https://ghid
 
 Without a shared server you can still run local mode against a local binary/project, but
 the multi-pod, multi-user connector model assumes the server.
+
+### Naming a program
+
+With `GHIDRA_SERVER_REPO` set, a program is named by its path in that repository — no
+host, no scheme, nothing to memorise:
+
+```
+create_session program="/windows/1.09d/D2Game.dll"     # relative to the configured repo
+create_session program="OtherRepo/windows/Game.exe"    # a different repo on the same server
+create_session program="1.09d/D2Game.dll"              # a suffix that matches exactly one program
+create_session binaryPath="ghidra://host[:port]/Repo/path"   # a different server; port defaults to 13100
+```
+
+`list_repos` and `list_programs` need **no session**: the daemon keeps one worker connected
+to the server with nothing open, so the repository can be browsed before a program is
+chosen. It is reaped once idle (`GHIDRA_MCP_REPO_SESSION_IDLE_MS`).
+
+A path the worker cannot reach fails with the reason — that the worker is elsewhere, and
+which server it *is* connected to — rather than "Binary not found".
+
+### Getting binaries in
+
+`import_program` puts a binary into the repository. The **worker** fetches the bytes, so
+give it a URL it can reach (or `localPath` on the worker host, or inline `bytesBase64`):
+
+```
+import_program url="https://files.example.com/1.09d/D2Game.dll" \
+               programPath="/windows/1.09d/D2Game.dll"
+```
+
+Analysis is far too slow to hold a request open, so the import runs as a background job and
+returns a `jobId` that `import_status` polls (pass `wait=true` for small ones). `items`
+imports many in a single job. `delete_program` and `move_program` fix an import that landed
+in the wrong place.
+
+With a shared repository configured, opening a **loose local binary is refused**: it would
+be imported into a project that dies with the session, so the analysis could never be
+committed, shared or reopened. Import it first. (Pure local mode, with no server configured,
+still opens a local binary or `.gpr` directly — there is nothing shared to import into.)
 
 ## Packages
 
@@ -160,7 +199,9 @@ provider with the `GHIDRA_MCP_OIDC_*` vars (only allow-listed users get tokens).
 | Env var | Purpose | Default |
 |-|-|-|
 | `GHIDRA_SERVER_HOST` / `GHIDRA_SERVER_PORT` | Default Ghidra Server the daemon connects to | — / `13100` |
+| `GHIDRA_SERVER_REPO` | Default repository, so clients name a program by its path alone | — |
 | `GHIDRA_SERVER_USER` / `GHIDRA_SERVER_PASSWORD` | Worker's Ghidra Server credentials | — |
+| `GHIDRA_MCP_REPO_SESSION_IDLE_MS` | Idle time before the repo-browsing worker is reaped | `600000` |
 | `GHIDRA_MCP_WORKER_BACKEND` | `process` (local child) or `k8s` (one pod per worker) | `process` |
 | `GHIDRA_MCP_WORKER_DAEMON_URL` | In-cluster Service URL workers call back to (k8s) | — |
 | `GHIDRA_MCP_WORKER_IMAGE` | Worker pod image (k8s) | inherits daemon's own image |
