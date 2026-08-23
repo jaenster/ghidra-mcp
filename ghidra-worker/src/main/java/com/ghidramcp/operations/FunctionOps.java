@@ -379,9 +379,11 @@ public class FunctionOps {
             info.localVariables.add(vinfo);
         }
 
-        // PAINPOINT #31: enrich undefined* types with the decompiler-resolved type.
-        // Build a name→resolvedType map from the HighFunction; only run if any
-        // local/param has an undefined* raw type (avoids needless decompile cost).
+        // A raw stack slot reads as undefined1[N] here while decompile resolves the real
+        // type, so the two tools disagreed about the same variable. Ask the decompiler and
+        // report what it says in resolvedType — as its own field, not appended to dataType,
+        // which has to stay a type name. Only run when something is actually undefined,
+        // to avoid a needless decompile.
         boolean hasUndefined = false;
         for (GhidraEngine.VariableInfo v : info.localVariables)
             if (v.dataType != null && v.dataType.startsWith("undefined")) { hasUndefined = true; break; }
@@ -395,27 +397,36 @@ public class FunctionOps {
                 if (dr != null && dr.decompileCompleted()) {
                     HighFunction hf = dr.getHighFunction();
                     if (hf != null) {
+                        // Match on name AND on storage: the decompiler often renames a slot
+                        // it has retyped, so name alone misses exactly the cases that matter.
                         Map<String, String> resolvedByName = new HashMap<>();
+                        Map<String, String> resolvedByStorage = new HashMap<>();
                         LocalSymbolMap lsm = hf.getLocalSymbolMap();
                         Iterator<HighSymbol> sit = lsm.getSymbols();
                         while (sit.hasNext()) {
                             HighSymbol hs = sit.next();
                             String dt = hs.getDataType() != null ? hs.getDataType().getName() : null;
-                            if (dt != null && !dt.startsWith("undefined"))
-                                resolvedByName.put(hs.getName(), dt);
+                            if (dt == null || dt.startsWith("undefined")) continue;
+                            resolvedByName.put(hs.getName(), dt);
+                            ghidra.program.model.listing.VariableStorage storage = hs.getStorage();
+                            if (storage != null) {
+                                resolvedByStorage.put(storage.toString(), dt);
+                            }
                         }
                         for (GhidraEngine.VariableInfo v : info.localVariables) {
                             if (v.dataType != null && v.dataType.startsWith("undefined")) {
                                 String resolved = resolvedByName.get(v.name);
-                                if (resolved != null)
-                                    v.dataType = v.dataType + " /* resolvedType: " + resolved + " */";
+                                if (resolved == null && v.storage != null)
+                                    resolved = resolvedByStorage.get(v.storage);
+                                v.resolvedType = resolved;
                             }
                         }
                         for (GhidraEngine.ParameterInfo p : info.parameters) {
                             if (p.dataType != null && p.dataType.startsWith("undefined")) {
                                 String resolved = resolvedByName.get(p.name);
-                                if (resolved != null)
-                                    p.dataType = p.dataType + " /* resolvedType: " + resolved + " */";
+                                if (resolved == null && p.storage != null)
+                                    resolved = resolvedByStorage.get(p.storage);
+                                p.resolvedType = resolved;
                             }
                         }
                     }

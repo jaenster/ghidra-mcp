@@ -394,6 +394,8 @@ export interface SearchCommand extends BaseCommand {
     functionFilter?: string;
     searchMode?: string;
     flowType?: string;
+    /** decompiled search only: how many functions to decompile before stopping. */
+    maxFunctions?: number;
   };
 }
 

@@ -1044,6 +1044,7 @@ export class GhidraToolHandler {
             functionFilter: params.functionFilter as string | undefined,
             searchMode: params.searchMode as string | undefined,
             flowType: params.flowType as string | undefined,
+            maxFunctions: params.maxFunctions as number | undefined,
           },
           timeout,
         };

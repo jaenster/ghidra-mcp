@@ -113,6 +113,8 @@ export interface ParameterInfo {
   size: number;
   ordinal: number;
   storage?: string;
+  /** What the decompiler makes of an undefined stack slot, when it knows better. */
+  resolvedType?: string;
 }
 
 export interface VariableInfo {
@@ -122,6 +124,8 @@ export interface VariableInfo {
   storage: string;
   stackOffset?: number;
   register?: string;
+  /** What the decompiler makes of an undefined stack slot, when it knows better. */
+  resolvedType?: string;
 }
 
 // =============================================================================

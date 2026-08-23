@@ -429,7 +429,7 @@ public class SymbolOps {
             }
             targetNs = current;
         } else {
-            targetNs = symbolTable.getNamespace(namespaceName, null);
+            targetNs = findNamespace(namespaceName);
         }
 
         if (targetNs == null) {
@@ -469,12 +469,30 @@ public class SymbolOps {
     }
 
     /**
+     * Resolve a namespace by path — "D2Game::Quests" as well as a bare name. Lookups that
+     * only consulted the global namespace failed on any nested one, which read as "no such
+     * namespace" for a namespace plainly present in the listing.
+     */
+    private Namespace findNamespace(String path) {
+        Program program = ctx.getProgram();
+        SymbolTable symbolTable = program.getSymbolTable();
+        Namespace current = program.getGlobalNamespace();
+        for (String part : path.split("::")) {
+            if (part.isEmpty()) continue;
+            Namespace next = symbolTable.getNamespace(part, current);
+            if (next == null) return null;
+            current = next;
+        }
+        return current == program.getGlobalNamespace() ? null : current;
+    }
+
+    /**
      * Rename an existing namespace.
      */
     public void renameNamespace(String oldName, String newName) throws Exception {
         Program program = ctx.getProgram();
         SymbolTable symbolTable = program.getSymbolTable();
-        Namespace ns = symbolTable.getNamespace(oldName, null);
+        Namespace ns = findNamespace(oldName);
         if (ns == null) {
             throw new Exception("Namespace not found: " + oldName);
         }
@@ -498,7 +516,7 @@ public class SymbolOps {
     public GhidraEngine.DeleteNamespaceResult deleteNamespace(String name, boolean force) throws Exception {
         Program program = ctx.getProgram();
         SymbolTable symbolTable = program.getSymbolTable();
-        Namespace ns = symbolTable.getNamespace(name, null);
+        Namespace ns = findNamespace(name);
         if (ns == null) {
             throw new Exception("Namespace not found: " + name);
         }

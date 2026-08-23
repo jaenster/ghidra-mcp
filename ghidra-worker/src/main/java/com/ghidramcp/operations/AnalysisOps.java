@@ -55,7 +55,8 @@ public class AnalysisOps {
                                   boolean countOnly, boolean includeContext,
                                   String scopeType, String scopeValue,
                                   String scopeStartAddress, String scopeEndAddress,
-                                  String functionFilter, String searchMode, String flowType) {
+                                  String functionFilter, String searchMode, String flowType,
+                                  int maxFunctions) {
         Program program = ctx.getProgram();
         SearchContext sctx = new SearchContext(offset, limit, countOnly, includeContext);
 
@@ -133,7 +134,7 @@ public class AnalysisOps {
         }
 
         if (types.contains("decompiled")) {
-            searchDecompiled(compiledRegex, sctx, scopeAddressSet, functionFilter);
+            searchDecompiled(compiledRegex, sctx, scopeAddressSet, functionFilter, maxFunctions);
         }
 
         if (types.contains("bytes")) {
@@ -422,7 +423,7 @@ public class AnalysisOps {
      * Hard cap: 200 functions without scope.
      */
     private void searchDecompiled(Pattern regex, SearchContext sctx,
-                                   AddressSet scope, String functionFilter) {
+                                   AddressSet scope, String functionFilter, int maxFunctions) {
         Program program = ctx.getProgram();
         DecompInterface decompiler = ctx.getDecompiler();
         TaskMonitor monitor = ctx.getMonitor();
@@ -446,14 +447,29 @@ public class AnalysisOps {
             }
         }
 
-        int hardCap = (scope != null || funcFilter != null) ? Integer.MAX_VALUE : 200;
+        // Decompiling is expensive, so an unscoped search stops after a few hundred
+        // functions. That cap used to be invisible: a name that lives in function 5000 came
+        // back as zero results, which reads as "not present" rather than "not looked at".
+        int defaultCap = (scope != null || funcFilter != null) ? Integer.MAX_VALUE : 200;
+        int hardCap = maxFunctions > 0 ? maxFunctions : defaultCap;
 
         // Collect candidate functions
         List<Function> candidates = new ArrayList<>();
-        while (iter.hasNext() && candidates.size() < hardCap) {
+        int eligible = 0;
+        while (iter.hasNext()) {
             Function func = iter.next();
             if (funcFilter != null && !funcFilter.matcher(func.getName()).find()) continue;
-            candidates.add(func);
+            eligible++;
+            if (candidates.size() < hardCap) {
+                candidates.add(func);
+            }
+        }
+        sctx.scanned = candidates.size();
+        sctx.scannable = eligible;
+        if (eligible > candidates.size()) {
+            sctx.coverageNote = "Decompiled search looked at " + candidates.size() + " of " + eligible
+                + " functions. A miss here does not mean the text is absent — narrow with "
+                + "functionFilter or scope, or raise maxFunctions.";
         }
 
         if (pool != null && candidates.size() > 1) {
@@ -830,6 +846,10 @@ public class AnalysisOps {
         final boolean includeContext;
         int totalMatches = 0;
         int skipped = 0;
+        /** Set when an expensive search only looked at part of the program. */
+        String coverageNote;
+        int scanned;
+        int scannable;
 
         SearchContext(int offset, int limit, boolean countOnly, boolean includeContext) {
             this.offset = offset;
@@ -869,6 +889,9 @@ public class AnalysisOps {
             resp.results = results;
             resp.total = totalMatches;
             resp.hasMore = !countOnly && totalMatches > offset + results.size();
+            resp.coverageNote = coverageNote;
+            resp.scanned = scanned;
+            resp.scannable = scannable;
             return resp;
         }
     }

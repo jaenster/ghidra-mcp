@@ -714,10 +714,12 @@ public class CommandHandler {
             scopeEndAddress = getString(scope, "endAddress", null);
         }
 
+        int maxFunctions = getInt(params, "maxFunctions", 0);
+
         GhidraEngine.SearchResponse response = engine.search(
             filter, regex, hexPattern, types, caseSensitive, limit, offset, countOnly, includeContext,
             scopeType, scopeValue, scopeStartAddress, scopeEndAddress, functionFilter,
-            searchMode, flowType
+            searchMode, flowType, maxFunctions
         );
 
         JsonObject result = new JsonObject();
@@ -729,6 +731,11 @@ public class CommandHandler {
         result.addProperty("limit", limit);
         result.addProperty("hasMore", response.hasMore);
         result.addProperty("countOnly", countOnly);
+        if (response.coverageNote != null) {
+            result.addProperty("coverageNote", response.coverageNote);
+            result.addProperty("functionsScanned", response.scanned);
+            result.addProperty("functionsAvailable", response.scannable);
+        }
         return result;
     }
 

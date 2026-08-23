@@ -594,7 +594,10 @@ export const coreReadTools: ToolDefinition[] = [
 
   defineTool(
     'get_function_info',
-    'Get detailed information about a specific function including parameters, local variables, and calling convention.',
+    'Get detailed information about a specific function including parameters, local variables, and calling convention. ' +
+    'A variable still typed as a raw stack slot (undefined1[N]) carries resolvedType alongside it — what decompile ' +
+    'makes of that slot — so the two tools agree about the same variable. ' +
+    'address may be anywhere inside the function, and name may be the fully-qualified one that list_symbols prints.',
     {
       ...sessionIdProp,
       ...addressOrNameProps,
@@ -1093,7 +1096,10 @@ export const llmPowerTools: ToolDefinition[] = [
     'Unified search across the program. Supports regex patterns and multiple search types. ' +
     'This is the primary discovery tool - use it to find functions, strings, symbols, and more. ' +
     'Advanced types "disassembly", "bytes", and "decompiled" are NOT included in "all" — they require explicit opt-in. ' +
-    '"bytes" uses hex patterns with ?? wildcards (e.g. "55 8B EC"), not regex.',
+    '"bytes" uses hex patterns with ?? wildcards (e.g. "55 8B EC"), not regex.\n' +
+    'Note on "decompiled": it decompiles as it goes, so an unscoped search stops after a few hundred ' +
+    'functions and says so in coverageNote — zero results there means "not seen", not "not present". ' +
+    'Narrow it with functionFilter or scope, or raise maxFunctions.',
     {
       ...sessionIdProp,
       pattern: {
@@ -1147,6 +1153,10 @@ export const llmPowerTools: ToolDefinition[] = [
         enum: ['call', 'jump', 'conditional_jump', 'unconditional_jump', 'terminal'],
         description: 'Pre-filter instructions by flow type (disassembly type only). ' +
                      'Can combine with any searchMode.',
+      },
+      maxFunctions: {
+        type: 'number',
+        description: 'Decompiled search only: how many functions to decompile before stopping (default: 200 unscoped, unlimited when functionFilter or scope narrows it)',
       },
     },
     ['type']

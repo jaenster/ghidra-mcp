@@ -452,10 +452,12 @@ public class GhidraEngine {
                                   boolean countOnly, boolean includeContext,
                                   String scopeType, String scopeValue,
                                   String scopeStartAddress, String scopeEndAddress,
-                                  String functionFilter, String searchMode, String flowType) {
+                                  String functionFilter, String searchMode, String flowType,
+                                  int maxFunctions) {
         return analysisOps.search(filter, regex, hexPattern, types, caseSensitive, limit, offset,
                                   countOnly, includeContext, scopeType, scopeValue,
-                                  scopeStartAddress, scopeEndAddress, functionFilter, searchMode, flowType);
+                                  scopeStartAddress, scopeEndAddress, functionFilter, searchMode, flowType,
+                                  maxFunctions);
     }
 
     public AnalysisHints getAnalysisHints(String address, String functionName) throws Exception {
@@ -663,6 +665,8 @@ public class GhidraEngine {
         public int ordinal;
         public String storage;
         public Integer stackOffset;
+        /** What the decompiler makes of an undefined stack slot, when it knows better. */
+        public String resolvedType;
     }
 
     public static class VariableInfo {
@@ -671,6 +675,8 @@ public class GhidraEngine {
         public int size;
         public String storage;
         public Integer stackOffset;
+        /** What the decompiler makes of an undefined stack slot, when it knows better. */
+        public String resolvedType;
     }
 
     public static class NamespaceInfo {
@@ -743,6 +749,11 @@ public class GhidraEngine {
         public List<SearchResult> results;
         public int total;      // Actual total number of matches (not capped by limit)
         public boolean hasMore; // Whether there are more results beyond this page
+        // Set when an expensive search covered only part of the program, so that zero
+        // results can be told apart from "nothing was looked at".
+        public String coverageNote;
+        public int scanned;
+        public int scannable;
     }
 
     /**
