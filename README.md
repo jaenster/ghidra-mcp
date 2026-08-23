@@ -98,7 +98,7 @@ Cloud-native mode is built around a **collaborative [Ghidra Server](https://ghid
 - The worker image's bundled Ghidra version **must match** the Ghidra Server version —
   the RMI handshake is version-checked.
 
-Without a shared server you can still run local mode against a local binary/project, but
+Without a shared server you can still run local mode against an existing `.gpr` project, but
 the multi-pod, multi-user connector model assumes the server.
 
 ### Naming a program
@@ -135,10 +135,10 @@ returns a `jobId` that `import_status` polls (pass `wait=true` for small ones). 
 imports many in a single job. `delete_program` and `move_program` fix an import that landed
 in the wrong place.
 
-With a shared repository configured, opening a **loose local binary is refused**: it would
-be imported into a project that dies with the session, so the analysis could never be
-committed, shared or reopened. Import it first. (Pure local mode, with no server configured,
-still opens a local binary or `.gpr` directly — there is nothing shared to import into.)
+Opening a **loose local binary is refused**: it would be imported into a project created for
+the session and destroyed with it, so the analysis could never be committed, shared or
+reopened. Import it first. A session opens a program from the repository, or a local `.gpr`
+project.
 
 ## Packages
 
