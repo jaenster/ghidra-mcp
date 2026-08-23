@@ -47,6 +47,12 @@ public class GhidraContext {
     private ghidra.framework.model.Project serverProject;
     // Live connection to the Ghidra Server RMI endpoint (server mode only).
     private ghidra.framework.client.RepositoryServerAdapter serverAdapter;
+    // Where that connection points, and which repository this worker has a project open on.
+    // Reported back to the daemon so a client that passes a local path gets told which host
+    // the worker actually sees.
+    private String serverHost;
+    private int serverPort;
+    private String serverRepoName;
     private static boolean jythonInitialized = false;
     private long cacheVersion = 0;
 
@@ -118,6 +124,11 @@ public class GhidraContext {
     public void setServerProject(ghidra.framework.model.Project serverProject) { this.serverProject = serverProject; }
     public ghidra.framework.client.RepositoryServerAdapter getServerAdapter() { return serverAdapter; }
     public void setServerAdapter(ghidra.framework.client.RepositoryServerAdapter serverAdapter) { this.serverAdapter = serverAdapter; }
+    public String getServerHost() { return serverHost; }
+    public int getServerPort() { return serverPort; }
+    public String getServerRepoName() { return serverRepoName; }
+    public void setServerLocation(String host, int port) { this.serverHost = host; this.serverPort = port; }
+    public void setServerRepoName(String repoName) { this.serverRepoName = repoName; }
     public void setReadOnly(boolean readOnly) { this.readOnly = readOnly; }
 
     // ============== Multi-program management ==============

@@ -42,6 +42,7 @@ public class CommandDispatcher {
     private static final Set<String> READ_COMMANDS = Set.of(
         "decompile", "batch_decompile", "batch_pcode",
         "list_repos", "list_functions", "list_programs", "list_strings", "list_segments",
+        "import_status",
         "list_imports", "list_exports", "list_namespaces", "list_symbols",
         "list_data_types", "list_comments", "list_bookmarks", "list_equates",
         "get_program_info", "get_function_info", "get_function_summary",

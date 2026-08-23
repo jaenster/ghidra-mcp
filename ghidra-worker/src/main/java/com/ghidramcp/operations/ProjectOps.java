@@ -283,13 +283,22 @@ public class ProjectOps {
      * writable.  The working copy is backed by a persistent local shared project on the
      * pod's /data PVC so the checkout (and any unsaved edits) survive worker restarts.
      */
-    public void openServerProgram(String host, int port, String repoName, String programPath,
-                                  String user, char[] password, boolean readOnly) throws Exception {
+    /**
+     * Connect to a remote Ghidra Server, without opening any repository or program.
+     *
+     * Authentication uses the standard Ghidra password authenticator.  Because most
+     * Ghidra Servers run in fixed-identity mode (the client may NOT choose its own
+     * login name — nameAllowed=false in the auth callback), the login name is derived
+     * from the JVM's user.name system property.  We therefore force user.name to the
+     * supplied server user id before installing the authenticator so the server sees
+     * the right identity.
+     */
+    public void connectServer(String host, int port, String user, char[] password) throws Exception {
         Logger log = ctx.getLog();
-        log.info("Connecting to Ghidra Server " + host + ":" + port + " repo=" + repoName +
-                 " program=" + programPath + " user=" + user + " readOnly=" + readOnly);
-
-        ctx.setReadOnly(readOnly);
+        if (ctx.getServerAdapter() != null && ctx.getServerAdapter().isConnected()) {
+            return;
+        }
+        log.info("Connecting to Ghidra Server " + host + ":" + port + " user=" + user);
 
         // Ghidra Servers commonly reject client-supplied login names (fixed identity mode);
         // the effective login name comes from user.name.  Align it with the requested user.
@@ -315,21 +324,41 @@ public class ProjectOps {
             throw new IOException("Failed to connect to Ghidra Server " + host + ":" + port);
         }
         ctx.setServerAdapter(server);
+        ctx.setServerLocation(host, port);
+    }
+
+    /**
+     * Open (or reuse) the local project bound to a repository on the connected server.
+     * No program is opened — this is what repo-scoped commands (listing, importing,
+     * deleting, moving) run against.
+     *
+     * The local project lives on the pod's /data PVC rooted at the PER-SESSION projects dir
+     * (ctx.getProjectPath() = /data/projects/&lt;sessionId&gt;) rather than a single shared
+     * /data/ghidra-projects/&lt;repo&gt;: every worker thus gets its own project dir, so two
+     * workers on the SAME repo don't fight over one Ghidra project lock (each takes its own
+     * non-exclusive checkout). The sessionId is stable across sticky reopens, so the working
+     * copy still survives worker/pod restarts.
+     */
+    public ghidra.framework.client.RepositoryAdapter openRepoProject(String repoName) throws Exception {
+        Logger log = ctx.getLog();
+        ghidra.framework.client.RepositoryServerAdapter server = requireServer();
 
         ghidra.framework.client.RepositoryAdapter repo = server.getRepository(repoName);
         repo.connect();
         if (!repo.isConnected()) {
             throw new IOException("Failed to connect to repository: " + repoName);
         }
+
+        if (repoName.equals(ctx.getServerRepoName()) && ctx.getServerProject() != null) {
+            return repo;  // already open
+        }
+        if (ctx.getServerProject() != null) {
+            throw new IllegalStateException("This worker already has repository '"
+                    + ctx.getServerRepoName() + "' open; it cannot also open '" + repoName + "'");
+        }
+
         log.info("Connected to repository '" + repoName + "', itemCount=" + repo.getItemCount());
 
-        // Open (or create) a persistent local project on the /data PVC, linked to the repository.
-        // This gives checkout/checkin a real project to work against and keeps the working copy on
-        // disk across worker restarts. Root it at the PER-SESSION projects dir (ctx.getProjectPath()
-        // = /data/projects/<sessionId>) rather than a single shared /data/ghidra-projects/<repo>:
-        // every worker thus gets its own project dir, so two workers on the SAME repo don't fight
-        // over one Ghidra project lock (each takes its own non-exclusive checkout). The sessionId is
-        // stable across sticky reopens, so the working copy still survives worker/pod restarts.
         String sessionProjectPath = ctx.getProjectPath();
         File projectRoot = (sessionProjectPath != null && !sessionProjectPath.isEmpty())
                 ? new File(sessionProjectPath)
@@ -347,9 +376,27 @@ public class ProjectOps {
         WorkerProjectManager pm = new WorkerProjectManager();
         Project project = openProjectRecoveringStaleLock(pm, locator, repo, projectRoot);
         ctx.setServerProject(project);
-        ProjectData projectData = project.getProjectData();
-        ctx.setProjectData(projectData);
+        ctx.setProjectData(project.getProjectData());
+        ctx.setServerRepoName(repoName);
+        return repo;
+    }
 
+    /**
+     * Connect to a remote Ghidra Server and open a shared program from a repository.
+     *
+     * When readOnly is false the program is checked out (non-exclusive) and opened
+     * writable.  The working copy is backed by a persistent local shared project on the
+     * pod's /data PVC so the checkout (and any unsaved edits) survive worker restarts.
+     */
+    public void openServerProgram(String host, int port, String repoName, String programPath,
+                                  String user, char[] password, boolean readOnly) throws Exception {
+        Logger log = ctx.getLog();
+        ctx.setReadOnly(readOnly);
+        connectServer(host, port, user, password);
+        openRepoProject(repoName);
+        log.info("Opening shared program " + programPath + " (readOnly=" + readOnly + ")");
+
+        ProjectData projectData = ctx.getProjectData();
         ghidra.util.task.TaskMonitor monitor = ctx.getMonitor();
         DomainFile df = projectData.getFile(programPath);
         if (df == null) {
@@ -388,6 +435,14 @@ public class ProjectOps {
         log.info("Shared program opened successfully: " + program.getName() +
                  " (" + program.getFunctionManager().getFunctionCount() + " functions, checkedOut=" +
                  df.isCheckedOut() + ")");
+    }
+
+    private ghidra.framework.client.RepositoryServerAdapter requireServer() throws IOException {
+        ghidra.framework.client.RepositoryServerAdapter server = ctx.getServerAdapter();
+        if (server == null || !server.isConnected()) {
+            throw new IOException("Not connected to a Ghidra Server");
+        }
+        return server;
     }
 
     /**

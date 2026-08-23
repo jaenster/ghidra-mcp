@@ -22,6 +22,7 @@ public class GhidraEngine {
 
     private final GhidraContext ctx;
     private final ProjectOps projectOps;
+    private final RepoOps repoOps;
     private final FunctionOps functionOps;
     private final SymbolOps symbolOps;
     private final DataTypeOps dataTypeOps;
@@ -33,6 +34,7 @@ public class GhidraEngine {
         this.ctx = new GhidraContext(projectPath, log, new ConsoleTaskMonitor());
         ProjectOps.initializeGhidra();
         this.projectOps = new ProjectOps(ctx);
+        this.repoOps = new RepoOps(ctx, projectOps);
         this.functionOps = new FunctionOps(ctx);
         this.symbolOps = new SymbolOps(ctx);
         this.dataTypeOps = new DataTypeOps(ctx);
@@ -108,6 +110,15 @@ public class GhidraEngine {
 
     public String[] listRepos() throws Exception {
         return projectOps.listRepos();
+    }
+
+    // ============== RepoOps (repository-scoped, no program needed) ==============
+
+    public RepoOps repo() { return repoOps; }
+
+    /** Connect to a Ghidra Server without opening any repository or program. */
+    public void connectServer(String host, int port, String user, char[] password) throws Exception {
+        projectOps.connectServer(host, port, user, password);
     }
 
     public void save() throws Exception {

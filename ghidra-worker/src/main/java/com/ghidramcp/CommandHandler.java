@@ -36,7 +36,7 @@ public class CommandHandler {
 
         switch (command) {
             case "list_programs":
-                return handleListPrograms();
+                return handleListPrograms(params);
 
             case "load_program":
                 return handleLoadProgram(params);
@@ -46,6 +46,18 @@ public class CommandHandler {
 
             case "list_repos":
                 return handleListRepos();
+
+            case "import_program":
+                return handleImportProgram(params);
+
+            case "import_status":
+                return handleImportStatus(params);
+
+            case "delete_program":
+                return handleDeleteProgram(params);
+
+            case "move_program":
+                return handleMoveProgram(params);
 
             case "list_functions":
                 return handleListFunctions(params);
@@ -350,6 +362,67 @@ public class CommandHandler {
         JsonObject result = new JsonObject();
         result.add("repos", gson.toJsonTree(repos));
         return result;
+    }
+
+    private JsonObject handleImportProgram(JsonObject params) throws Exception {
+        String repo = getString(params, "repo", null);
+        if (repo == null) {
+            throw new IllegalArgumentException("repo is required");
+        }
+        List<com.ghidramcp.operations.RepoOps.ImportSpec> specs = new ArrayList<>();
+        if (params.has("items") && params.get("items").isJsonArray()) {
+            for (var el : params.getAsJsonArray("items")) {
+                specs.add(parseImportSpec(el.getAsJsonObject()));
+            }
+        } else {
+            specs.add(parseImportSpec(params));
+        }
+        boolean analyze = getBoolean(params, "analyze", true);
+        boolean overwrite = getBoolean(params, "overwrite", false);
+        boolean wait = getBoolean(params, "wait", false);
+        int waitTimeout = getInt(params, "waitTimeout", 0);
+        return engine.repo().importPrograms(repo, specs, analyze, overwrite, wait, waitTimeout);
+    }
+
+    private com.ghidramcp.operations.RepoOps.ImportSpec parseImportSpec(JsonObject o) {
+        com.ghidramcp.operations.RepoOps.ImportSpec spec =
+            new com.ghidramcp.operations.RepoOps.ImportSpec();
+        spec.url = getString(o, "url", null);
+        spec.localPath = getString(o, "localPath", null);
+        spec.bytesBase64 = getString(o, "bytesBase64", null);
+        spec.programPath = getString(o, "programPath", null);
+        spec.processor = getString(o, "processor", null);
+        spec.compilerSpec = getString(o, "compilerSpec", null);
+        return spec;
+    }
+
+    private JsonObject handleImportStatus(JsonObject params) {
+        String jobId = getString(params, "jobId", null);
+        if (jobId == null) {
+            JsonObject result = new JsonObject();
+            result.add("jobs", engine.repo().listJobs());
+            return result;
+        }
+        return engine.repo().jobStatus(jobId);
+    }
+
+    private JsonObject handleDeleteProgram(JsonObject params) throws Exception {
+        String repo = getString(params, "repo", null);
+        String programPath = getString(params, "programPath", null);
+        if (repo == null || programPath == null) {
+            throw new IllegalArgumentException("repo and programPath are required");
+        }
+        return engine.repo().deleteProgram(repo, programPath);
+    }
+
+    private JsonObject handleMoveProgram(JsonObject params) throws Exception {
+        String repo = getString(params, "repo", null);
+        String from = getString(params, "from", null);
+        String to = getString(params, "to", null);
+        if (repo == null || from == null || to == null) {
+            throw new IllegalArgumentException("repo, from and to are required");
+        }
+        return engine.repo().moveProgram(repo, from, to);
     }
 
     private JsonObject handleListFunctions(JsonObject params) {
@@ -1893,7 +1966,16 @@ public class CommandHandler {
 
     // ==================== MULTI-PROGRAM ====================
 
-    private JsonObject handleListPrograms() throws Exception {
+    private JsonObject handleListPrograms(JsonObject params) throws Exception {
+        // With a repo, list straight off the server so no project (and no session with a
+        // program already open) is needed — that is what makes the repo discoverable.
+        String repo = getString(params, "repo", null);
+        if (repo != null) {
+            return engine.repo().listRepoPrograms(repo,
+                    getString(params, "folder", null),
+                    getBoolean(params, "recursive", true),
+                    getString(params, "filter", null));
+        }
         JsonArray programs = engine.listPrograms();
         JsonObject result = new JsonObject();
         result.add("programs", programs);

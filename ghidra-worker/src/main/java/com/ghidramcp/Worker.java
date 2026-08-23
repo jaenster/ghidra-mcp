@@ -98,17 +98,26 @@ public class Worker {
                     throw new IllegalStateException(
                         "GHIDRA_SERVER_PASSWORD environment variable is required for --ghidra-server");
                 }
-                log.info("Opening shared program from Ghidra Server " + host + ":" + port +
-                         " repo=" + serverRepo + " program=" + serverProgram +
-                         " user=" + serverUser + " (read-only=" + readOnly + ")");
                 char[] pw = password.toCharArray();
                 try {
-                    engine.openServerProgram(host, port, serverRepo, serverProgram,
-                                             serverUser, pw, readOnly);
+                    if (serverProgram == null) {
+                        // Repo mode: connect only. No program is opened, so this worker can
+                        // answer discovery and import commands before any program is chosen.
+                        log.info("Connecting to Ghidra Server " + host + ":" + port +
+                                 " user=" + serverUser + " (repo mode, no program)");
+                        engine.connectServer(host, port, serverUser, pw);
+                        log.info("Connected to Ghidra Server (repo mode)");
+                    } else {
+                        log.info("Opening shared program from Ghidra Server " + host + ":" + port +
+                                 " repo=" + serverRepo + " program=" + serverProgram +
+                                 " user=" + serverUser + " (read-only=" + readOnly + ")");
+                        engine.openServerProgram(host, port, serverRepo, serverProgram,
+                                                 serverUser, pw, readOnly);
+                        log.info("Shared program opened successfully");
+                    }
                 } finally {
                     java.util.Arrays.fill(pw, '\0');
                 }
-                log.info("Shared program opened successfully");
             } else {
             // Check if this is a .gpr project file or a binary
             File inputFile = new File(binaryPath);
@@ -390,11 +399,17 @@ public class Worker {
         boolean serverMode = serverHostPort != null;
         boolean baseOk = workerId != null && sessionId != null && daemonUrl != null;
         if (serverMode) {
-            if (!baseOk || serverRepo == null || serverProgram == null || serverUser == null) {
+            // --program is optional: without it the worker starts in repo mode (connected to
+            // the server, nothing open), which serves discovery and import.
+            if (!baseOk || serverUser == null) {
                 System.err.println("Usage (server mode): Worker --worker-id <id> --session-id <id> " +
-                                 "--daemon-url <url> --ghidra-server <host:port> --repo <name> " +
-                                 "--program <pathWithinRepo> --server-user <sid> [--read-only]\n" +
+                                 "--daemon-url <url> --ghidra-server <host:port> --server-user <sid> " +
+                                 "[--repo <name>] [--program <pathWithinRepo>] [--read-only]\n" +
                                  "  (password supplied via GHIDRA_SERVER_PASSWORD env var)");
+                System.exit(1);
+            }
+            if (serverProgram != null && serverRepo == null) {
+                System.err.println("Usage (server mode): --program requires --repo");
                 System.exit(1);
             }
             // Server programs open writable (checked-out) by default; pass --read-only to
