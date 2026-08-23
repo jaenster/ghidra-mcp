@@ -144,6 +144,11 @@ public class GhidraEngine {
         return functionOps.listFunctions(offset, limit, filter, regex, namespace, includeChildren);
     }
 
+    /** Resolve a function, or throw an error that says what was looked for and what is near it. */
+    public Function requireFunction(String address, String name) throws Exception {
+        return ctx.requireFunction(address, name);
+    }
+
     public Function getFunction(String address, String name) {
         return functionOps.getFunction(address, name);
     }

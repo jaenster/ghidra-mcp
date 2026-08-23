@@ -2411,19 +2411,6 @@ public class AnalysisOps {
      * Get a function by address or name. Simple lookup used by getPcode, getStackFrame, etc.
      */
     private Function getFunction(String address, String name) {
-        Program program = ctx.getProgram();
-        if (address != null) {
-            Address addr = ctx.parseAddress(address);
-            return program.getFunctionManager().getFunctionAt(addr);
-        } else if (name != null) {
-            Iterator<Function> iter = program.getFunctionManager().getFunctions(true);
-            while (iter.hasNext()) {
-                Function func = iter.next();
-                if (func.getName().equals(name)) {
-                    return func;
-                }
-            }
-        }
-        return null;
+        return ctx.resolveFunction(address, name);
     }
 }

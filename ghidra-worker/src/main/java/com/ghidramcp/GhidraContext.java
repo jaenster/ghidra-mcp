@@ -191,6 +191,115 @@ public class GhidraContext {
         return factory.getAddress(addressStr);
     }
 
+    // ============== Function resolution ==============
+
+    /**
+     * Resolve a function by address or by name — the single place every tool goes through, so
+     * they all accept the same things.
+     *
+     * An address anywhere inside a function resolves to that function, not just its entry.
+     * A name may be the simple name ("FN") or the fully-qualified one that list_symbols and
+     * list_functions print ("Storm::Source::SFile::FN"); anything a tool emits is accepted by
+     * the tools that consume it. A simple name matching several functions is an error naming
+     * the candidates rather than a silent pick — duplicate names are real in stripped binaries.
+     *
+     * Returns null when nothing matches; use {@link #requireFunction} to get an error that
+     * explains what was looked for.
+     */
+    public Function resolveFunction(String address, String name) {
+        FunctionManager fm = program.getFunctionManager();
+
+        if (address != null) {
+            Address addr = parseAddress(address);
+            if (addr == null) {
+                return null;
+            }
+            Function f = fm.getFunctionAt(addr);
+            return f != null ? f : fm.getFunctionContaining(addr);
+        }
+        if (name == null) {
+            return null;
+        }
+
+        String wanted = name.startsWith("::") ? name.substring(2) : name;
+        List<Function> simpleMatches = new ArrayList<>();
+        Iterator<Function> iter = fm.getFunctions(true);
+        while (iter.hasNext()) {
+            Function func = iter.next();
+            if (func.getName(true).equals(wanted)) {
+                return func;  // fully-qualified match wins, and is never ambiguous
+            }
+            if (func.getName().equals(wanted)) {
+                simpleMatches.add(func);
+            }
+        }
+        if (simpleMatches.size() == 1) {
+            return simpleMatches.get(0);
+        }
+        if (simpleMatches.size() > 1) {
+            StringBuilder sb = new StringBuilder();
+            sb.append('"').append(name).append("\" matches ").append(simpleMatches.size())
+              .append(" functions: ");
+            for (int i = 0; i < Math.min(simpleMatches.size(), 8); i++) {
+                Function f = simpleMatches.get(i);
+                if (i > 0) sb.append(", ");
+                sb.append(f.getEntryPoint()).append(' ').append(f.getName(true));
+            }
+            if (simpleMatches.size() > 8) sb.append(", …");
+            sb.append(". Pass the fully-qualified name, or address=.");
+            throw new IllegalArgumentException(sb.toString());
+        }
+        return null;
+    }
+
+    /**
+     * Resolve a function, or fail with a message that says what was looked for and what is
+     * nearby — "Function not found" on its own sends people hunting in the wrong place.
+     */
+    public Function requireFunction(String address, String name) throws Exception {
+        Function func = resolveFunction(address, name);
+        if (func != null) {
+            return func;
+        }
+        if (address != null) {
+            Address addr = parseAddress(address);
+            if (addr == null) {
+                throw new Exception("Not a valid address for this program: " + address);
+            }
+            Function before = null;
+            for (Function f : program.getFunctionManager().getFunctions(false)) {
+                if (f.getEntryPoint().compareTo(addr) <= 0) {
+                    before = f;
+                    break;
+                }
+            }
+            String hint = before != null
+                ? " The nearest function before it is " + before.getName(true) + " at "
+                  + before.getEntryPoint() + ", which ends before this address."
+                : "";
+            throw new Exception("No function at or containing " + address + "." + hint);
+        }
+        throw new Exception("No function named \"" + name + "\"." + nameSuggestion(name));
+    }
+
+    /** Up to a handful of function names containing the same text, to catch near-misses. */
+    private String nameSuggestion(String name) {
+        String needle = name.toLowerCase();
+        int cut = needle.lastIndexOf("::");
+        if (cut >= 0) {
+            needle = needle.substring(cut + 2);
+        }
+        List<String> near = new ArrayList<>();
+        Iterator<Function> iter = program.getFunctionManager().getFunctions(true);
+        while (iter.hasNext() && near.size() < 5) {
+            Function f = iter.next();
+            if (f.getName().toLowerCase().contains(needle)) {
+                near.add(f.getName(true));
+            }
+        }
+        return near.isEmpty() ? "" : " Similar: " + String.join(", ", near) + ".";
+    }
+
     // ============== Filter utilities ==============
 
     /**

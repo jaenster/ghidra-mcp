@@ -445,10 +445,7 @@ public class CommandHandler {
         String address = getString(params, "address", null);
         String name = getString(params, "name", null);
 
-        Function func = engine.getFunction(address, name);
-        if (func == null) {
-            throw new Exception("Function not found");
-        }
+        Function func = engine.requireFunction(address, name);
 
         GhidraEngine.FunctionInfo info = engine.getFunctionInfo(func);
         return gson.toJsonTree(info).getAsJsonObject();
@@ -460,10 +457,7 @@ public class CommandHandler {
         int timeout = getInt(params, "timeout", 30);
         log.debug("decompile: address=" + address + " name=" + name + " timeout=" + timeout);
 
-        Function func = engine.getFunction(address, name);
-        if (func == null) {
-            throw new Exception("Function not found");
-        }
+        Function func = engine.requireFunction(address, name);
 
         GhidraEngine.DecompileResult result = engine.decompile(func, timeout);
         return gson.toJsonTree(result).getAsJsonObject();

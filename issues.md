@@ -18,12 +18,12 @@ Worked top to bottom, one commit per item.
 **B. Getting binaries in (issue 2)**
 - [x] B1 `import_program` — URL or uploaded bytes → repo path
 - [x] B2 batch form (many files / directory + path template)
-- [ ] B3 analysis startable + pollable, not held open on one request
+- [x] B3 analysis startable + pollable, not held open on one request
 - [x] B4 `delete_program` / `move_program`
 
 **C. Name resolution (issue 3)**
-- [ ] C1 accept fully namespaced names wherever names are accepted
-- [ ] C2 mid-function address resolves the containing function
+- [x] C1 accept fully namespaced names wherever names are accepted
+- [x] C2 mid-function address resolves the containing function
 
 **D. Prototypes (issue 4)**
 - [ ] D1 never silently reset the calling convention

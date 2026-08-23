@@ -300,35 +300,7 @@ public class FunctionOps {
      * Get function by address or name
      */
     public Function getFunction(String address, String name) {
-        var fm = ctx.getProgram().getFunctionManager();
-        if (address != null) {
-            Address addr = ctx.parseAddress(address);
-            Function f = fm.getFunctionAt(addr);
-            if (f == null) {
-                // Resolve a mid-function address to its containing function's entry,
-                // so decompile/get_function_info work for any address inside a function.
-                f = fm.getFunctionContaining(addr);
-            }
-            return f;
-        } else if (name != null) {
-            // Accept either the simple name ("FN") or the fully-namespaced form
-            // ("Storm::Source::SFile::FN") that list_symbols / list_functions emit.
-            // An exact namespaced match wins (also disambiguates duplicate simple
-            // names across namespaces); otherwise fall back to the first simple match.
-            Function simpleMatch = null;
-            Iterator<Function> iter = fm.getFunctions(true);
-            while (iter.hasNext()) {
-                Function func = iter.next();
-                if (func.getName(true).equals(name)) {
-                    return func;
-                }
-                if (simpleMatch == null && func.getName().equals(name)) {
-                    simpleMatch = func;
-                }
-            }
-            return simpleMatch;
-        }
-        return null;
+        return ctx.resolveFunction(address, name);
     }
 
     /**
@@ -591,28 +563,40 @@ public class FunctionOps {
         if (addresses != null && !addresses.isEmpty()) {
             // Explicit address list
             for (String addr : addresses) {
-                Function func = this.getFunction(addr, null);
+                Function func = null;
+                String error = null;
+                try {
+                    func = this.getFunction(addr, null);
+                } catch (RuntimeException e) {
+                    error = e.getMessage();
+                }
                 if (func != null) {
                     functions.add(func);
                 } else {
                     GhidraEngine.BatchDecompileFailure fail = new GhidraEngine.BatchDecompileFailure();
                     fail.address = addr;
                     fail.name = "";
-                    fail.error = "Function not found at address: " + addr;
+                    fail.error = error != null ? error : "No function at or containing " + addr;
                     result.failed.add(fail);
                 }
             }
         } else if (names != null && !names.isEmpty()) {
             // Explicit name list
             for (String name : names) {
-                Function func = this.getFunction(null, name);
+                Function func = null;
+                String error = null;
+                try {
+                    func = this.getFunction(null, name);
+                } catch (RuntimeException e) {
+                    error = e.getMessage();
+                }
                 if (func != null) {
                     functions.add(func);
                 } else {
                     GhidraEngine.BatchDecompileFailure fail = new GhidraEngine.BatchDecompileFailure();
                     fail.address = "";
                     fail.name = name;
-                    fail.error = "Function not found: " + name;
+                    fail.error = error != null ? error : "No function named \"" + name + "\"";
                     result.failed.add(fail);
                 }
             }
