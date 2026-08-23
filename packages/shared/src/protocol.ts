@@ -511,6 +511,8 @@ export interface SetPrototypeCommand extends BaseCommand {
     functionAddress: string;
     prototype: string;
     description?: string;
+    /** Convention to set, e.g. "__stdcall". May also be written into the prototype string. */
+    callingConvention?: string;
     /** Confirm applying the prototype even when it would clear custom/register storage. */
     force?: boolean;
   };

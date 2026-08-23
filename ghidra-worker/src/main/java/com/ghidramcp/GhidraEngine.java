@@ -369,8 +369,9 @@ public class GhidraEngine {
         return dataTypeOps.readDataValue(addressStr);
     }
 
-    public java.util.List<String> setPrototype(String functionAddress, String prototype, String description, boolean force) throws Exception {
-        return dataTypeOps.setPrototype(functionAddress, prototype, description, force);
+    public java.util.List<String> setPrototype(String functionAddress, String prototype, String description,
+                                               String callingConvention, boolean force) throws Exception {
+        return dataTypeOps.setPrototype(functionAddress, prototype, description, callingConvention, force);
     }
 
     public void setCustomSignature(String functionAddress, String returnType, List<CustomParameter> parameters, String description) throws Exception {

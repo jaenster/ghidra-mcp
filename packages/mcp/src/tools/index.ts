@@ -1382,7 +1382,9 @@ export const modificationTools: ToolDefinition[] = [
 
   defineTool(
     'set_prototype',
-    'Set a function\'s prototype/signature.',
+    'Set a function\'s prototype/signature. The function\'s calling convention is preserved unless ' +
+    'you ask to change it — pass callingConvention, or write it into the prototype the way C does ' +
+    '("ushort __stdcall Foo(uint a)"). The resulting convention is reported back.',
     {
       ...sessionIdProp,
       functionAddress: {
@@ -1391,7 +1393,11 @@ export const modificationTools: ToolDefinition[] = [
       },
       prototype: {
         type: 'string',
-        description: 'Function prototype (e.g., "int main(int argc, char **argv)")',
+        description: 'Function prototype (e.g., "int main(int argc, char **argv)"). A calling-convention keyword in it is understood.',
+      },
+      callingConvention: {
+        type: 'string',
+        description: 'Calling convention to set, e.g. "__stdcall", "__cdecl", "__fastcall", "__thiscall". Omit to keep the current one. For register conventions Ghidra has no name for (IDA\'s __usercall), use set_custom_signature.',
       },
       description: {
         type: 'string',

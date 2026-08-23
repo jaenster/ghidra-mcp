@@ -770,18 +770,33 @@ public class DataTypeOps {
      * Set a function's prototype/signature.
      */
     public java.util.List<String> setPrototype(String functionAddress, String prototype, String description, boolean force) throws Exception {
-        Program program = ctx.getProgram();
-        Address address = ctx.parseAddress(functionAddress);
-        Function func = program.getFunctionManager().getFunctionAt(address);
+        return setPrototype(functionAddress, prototype, description, null, force);
+    }
 
-        if (func == null) {
-            throw new Exception("Function not found at: " + functionAddress);
-        }
+    /**
+     * Set a function's prototype/signature, optionally along with its calling convention.
+     *
+     * The convention may be given as its own argument or written into the signature the way
+     * a C declaration does ("ushort __stdcall Foo(uint a)") — Ghidra's signature parser
+     * chokes on the keyword, treating it as part of the return type, so it is lifted out
+     * here. The function's existing convention is never silently reset: without an explicit
+     * request it is preserved.
+     */
+    public java.util.List<String> setPrototype(String functionAddress, String prototype, String description,
+                                               String callingConvention, boolean force) throws Exception {
+        Program program = ctx.getProgram();
+        Function func = ctx.requireFunction(functionAddress, null);
+        Address address = func.getEntryPoint();
 
         ctx.assertReadBeforeWrite(func.getEntryPoint().toString(), func.getName(), force);
 
         java.util.List<String> warnings = new java.util.ArrayList<>();
         boolean clearStorage = false;
+
+        // Lift a convention keyword out of the signature text; an explicit argument wins.
+        ConventionInSignature parsed = extractCallingConvention(prototype);
+        prototype = parsed.prototype;
+        String wantedConvention = callingConvention != null ? callingConvention : parsed.convention;
 
         // A plain prototype string carries NO storage info. Functions with custom /
         // auto-detected register storage (e.g. __usercall EAX-return, __fastcall ECX/EDX,
@@ -833,6 +848,10 @@ public class DataTypeOps {
                 );
             cmd.applyTo(program);
 
+            if (wantedConvention != null) {
+                applyCallingConvention(program, func, wantedConvention, warnings);
+            }
+
             ctx.updateFunctionPlateComment(func, description);
             program.endTransaction(txId, true);
             ctx.updateFunctionModCount(func.getEntryPoint().toString());
@@ -840,7 +859,86 @@ public class DataTypeOps {
             program.endTransaction(txId, false);
             throw e;
         }
+        warnings.add("Calling convention: " + func.getCallingConventionName());
         return warnings;
+    }
+
+    /** A prototype string with any calling-convention keyword taken out of it. */
+    private static final class ConventionInSignature {
+        String prototype;
+        String convention;
+    }
+
+    /**
+     * Conventions as they are written in a declaration. Ghidra names them with two leading
+     * underscores; the bare and single-underscore spellings are accepted because that is how
+     * they turn up in headers and in decompiler output.
+     */
+    private static final java.util.Map<String, String> CONVENTION_KEYWORDS = java.util.Map.ofEntries(
+        java.util.Map.entry("__cdecl", "__cdecl"),
+        java.util.Map.entry("_cdecl", "__cdecl"),
+        java.util.Map.entry("cdecl", "__cdecl"),
+        java.util.Map.entry("__stdcall", "__stdcall"),
+        java.util.Map.entry("_stdcall", "__stdcall"),
+        java.util.Map.entry("stdcall", "__stdcall"),
+        java.util.Map.entry("__fastcall", "__fastcall"),
+        java.util.Map.entry("_fastcall", "__fastcall"),
+        java.util.Map.entry("fastcall", "__fastcall"),
+        java.util.Map.entry("__thiscall", "__thiscall"),
+        java.util.Map.entry("_thiscall", "__thiscall"),
+        java.util.Map.entry("thiscall", "__thiscall"),
+        java.util.Map.entry("__vectorcall", "__vectorcall"),
+        java.util.Map.entry("__pascal", "__pascal"),
+        java.util.Map.entry("pascal", "__pascal"),
+        java.util.Map.entry("__regcall", "__regcall")
+    );
+
+    private ConventionInSignature extractCallingConvention(String prototype) {
+        ConventionInSignature out = new ConventionInSignature();
+        out.prototype = prototype;
+        if (prototype == null) {
+            return out;
+        }
+        int paren = prototype.indexOf('(');
+        String head = paren >= 0 ? prototype.substring(0, paren) : prototype;
+        String tail = paren >= 0 ? prototype.substring(paren) : "";
+
+        java.util.List<String> kept = new java.util.ArrayList<>();
+        for (String token : head.trim().split("\\s+")) {
+            String mapped = CONVENTION_KEYWORDS.get(token);
+            if (mapped != null && out.convention == null) {
+                out.convention = mapped;
+            } else if (mapped == null) {
+                kept.add(token);
+            }
+        }
+        if (out.convention != null) {
+            out.prototype = String.join(" ", kept) + tail;
+        }
+        return out;
+    }
+
+    /**
+     * Apply a calling convention, checking it against what this program's compiler spec
+     * actually knows — an unknown name would otherwise fail deep inside Ghidra.
+     */
+    private void applyCallingConvention(Program program, Function func, String convention,
+                                        java.util.List<String> warnings) throws Exception {
+        String requested = convention.startsWith("__") ? convention
+            : CONVENTION_KEYWORDS.getOrDefault(convention, convention);
+        java.util.Collection<String> known = program.getFunctionManager().getCallingConventionNames();
+        if (!known.contains(requested)) {
+            throw new Exception("Unknown calling convention '" + convention + "' for this program. "
+                + "Available: " + String.join(", ", known)
+                + ". For register conventions Ghidra has no name for (IDA's __usercall), use "
+                + "set_custom_signature with explicit per-parameter storage.");
+        }
+        String before = func.getCallingConventionName();
+        if (requested.equals(before)) {
+            return;
+        }
+        func.setCallingConvention(requested);
+        warnings.add("Calling convention changed from " + before + " to " + requested + ".");
     }
 
     /**

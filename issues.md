@@ -26,8 +26,8 @@ Worked top to bottom, one commit per item.
 - [x] C2 mid-function address resolves the containing function
 
 **D. Prototypes (issue 4)**
-- [ ] D1 never silently reset the calling convention
-- [ ] D2 accept the convention (in the signature and as its own argument)
+- [x] D1 never silently reset the calling convention
+- [x] D2 accept the convention (in the signature and as its own argument)
 
 **E. Types (issue 5)**
 - [ ] E1 `update_structure` bitfield members

@@ -1197,6 +1197,7 @@ export class GhidraToolHandler {
             functionAddress: params.functionAddress as string,
             prototype: params.prototype as string,
             description: params.description as string | undefined,
+            callingConvention: params.callingConvention as string | undefined,
             force: params.force as boolean | undefined,
           },
           timeout,

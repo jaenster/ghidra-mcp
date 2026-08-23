@@ -1075,7 +1075,10 @@ public class CommandHandler {
             throw new IllegalArgumentException("functionAddress and prototype are required");
         }
 
-        java.util.List<String> warnings = engine.setPrototype(functionAddress, prototype, description, force);
+        String callingConvention = getString(params, "callingConvention", null);
+
+        java.util.List<String> warnings = engine.setPrototype(
+            functionAddress, prototype, description, callingConvention, force);
         engine.invalidateCache();
 
         JsonObject result = new JsonObject();
