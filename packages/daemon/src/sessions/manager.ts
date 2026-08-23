@@ -407,6 +407,12 @@ export class SessionManager {
     if (!explicitlyRelative && rest.length > 0 && firstSegment !== defaultRepo) {
       candidates.push({ repo: firstSegment, programPath: `/${rest.join('/')}` });
     }
+    // A leading slash with a configured repo is unambiguous by construction, so open it
+    // directly: consulting the server here would mean spawning the repo worker on every
+    // session creation, and the worker's own "not found in repository" is already clear.
+    if (explicitlyRelative && defaultRepo) {
+      return candidates[0];
+    }
     if (candidates.length === 0) {
       throw new Error(
         `Cannot tell which repository "${input}" is in: no GHIDRA_SERVER_REPO is configured and `

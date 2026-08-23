@@ -22,11 +22,11 @@ Worked top to bottom, one commit per item.
 - [x] B4 `delete_program` / `move_program`
 
 **C. Name resolution (issue 3)**
-- [x] C1 accept fully namespaced names wherever names are accepted
+- [x] C1 accept fully namespaced names wherever names are accepted — `decompile` already did; AnalysisOps and SymbolOps each held a stale copy of the old lookup, so `get_pcode`/`get_stack_frame`/tags/attributes did not
 - [x] C2 mid-function address resolves the containing function
 
 **D. Prototypes (issue 4)**
-- [x] D1 never silently reset the calling convention
+- [x] D1 never silently reset the calling convention (already on main: preserveCallingConvention + custom-storage guard)
 - [x] D2 accept the convention (in the signature and as its own argument)
 
 **E. Types (issue 5)**
@@ -34,9 +34,9 @@ Worked top to bottom, one commit per item.
 
 **F. Smaller ones (issue 6)**
 - [x] F1 `list_data_symbols` honours `dataType` — already correct on main, wired end to end; schema wording clarified
-- [x] F2 `get_data_at_address` reports overlapping labels
+- [x] F2 `get_data_at_address` reports overlapping labels (already on main) and now the containing struct + field for an address inside one
 - [x] F3 `get_symbol_after` deduplicates one-address aliases
-- [x] F4 `search type=decompiled` indexes local names / field-extract syntax
+- [x] F4 `search type=decompiled` — the raw C it matches does contain local names and `._N_M_`; the cause was the invisible 200-function cap, now reported (`coverageNote`) and raisable (`maxFunctions`)
 - [x] F5 `list_symbols type=LOCAL_VAR` returns function-scoped locals
 - [x] F6 `get_function_info` stack-slot types agree with `decompile`
 - [x] F7 `find_functions_matching` pages instead of blowing the token limit
@@ -44,6 +44,14 @@ Worked top to bottom, one commit per item.
 
 **G. Sessions (issue 7)**
 - [x] G1 `close_session` reports refcount vs. actual close, and takes `force`
+
+**Verified** by driving a real worker against the test fixtures: C1, C2, D2, E1, F4, F5, F7,
+G1, and the local-path errors. The full e2e suite passes (55/55; the 3 auth-suite failures
+predate this work and reproduce on a clean tree).
+
+**Not verifiable here** — no Ghidra Server on this machine: repo mode (A4), `import_program`,
+`delete_program`, `move_program`. These compile and are wired end to end, but want a run
+against the real server.
 
 ---
 
