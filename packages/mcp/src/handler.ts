@@ -3,7 +3,7 @@
  */
 
 import type { Session, LogQueryOptions, LogQueryResult } from '@ghidra-mcp/shared';
-import type { WorkerCommand, WorkerResponse } from '@ghidra-mcp/shared/protocol';
+import type { WorkerCommand, WorkerResponse, ImportSpecParams } from '@ghidra-mcp/shared/protocol';
 import { formatResponse } from './toon.js';
 
 /**
@@ -14,7 +14,13 @@ export interface ToolHandlerContext {
   listSessions(): Promise<Session[]>;
   getSession(sessionId: string): Promise<Session | null>;
   createSession(binaryPath: string, options?: SessionCreateOptions): Promise<Session>;
-  closeSession(sessionId: string): Promise<void>;
+  closeSession(sessionId: string, force?: boolean): Promise<CloseSessionResult | void>;
+
+  /** A worker connected to the Ghidra Server with nothing open, for repo-scoped tools. */
+  getRepoSession?(): Promise<string>;
+
+  /** The repository the daemon is configured for, so clients need not name it. */
+  getDefaultRepo?(): string | undefined;
 
   // Send command to a session's worker
   sendCommand(
@@ -100,6 +106,13 @@ export interface ToolHandlerContext {
   // Dependency validation
   storeDependencyRun?(violations: Array<{ file: string; includePath: string; owningModule: string; referencedModule: string }>): string;
   getLatestDependencyRun?(): { runId: string; violations: Array<{ file: string; includePath: string; owningModule: string; referencedModule: string }>; createdAt: Date } | null;
+}
+
+export interface CloseSessionResult {
+  closed: boolean;
+  sessionId: string;
+  clientCount: number;
+  message?: string;
 }
 
 export interface SessionCreateOptions {
@@ -194,9 +207,11 @@ export class GhidraToolHandler {
         return this.context.listSessions();
 
       case 'create_session': {
-        const binaryPath = args.binaryPath as string;
+        // `program` is the repo path form; `binaryPath` is kept for ghidra:// URLs and
+        // local .gpr projects. Either names the same thing to the resolver.
+        const binaryPath = (args.program as string) || (args.binaryPath as string);
         if (!binaryPath) {
-          throw new Error('binaryPath is required');
+          throw new Error('program is required (a repository path, or a ghidra:// URL)');
         }
         const session = await this.context.createSession(binaryPath, {
           autoAnalyze: args.autoAnalyze as boolean | undefined,
@@ -212,15 +227,20 @@ export class GhidraToolHandler {
       }
 
       case 'close_session': {
-        const closeSessionId = (args.sessionId as string) || sessionId;
-        if (!closeSessionId) {
+        const rawCloseId = (args.sessionId as string) || sessionId;
+        if (!rawCloseId) {
           throw new Error('sessionId is required');
         }
-        await this.context.closeSession(closeSessionId);
-        if (this.context.getDefaultSessionId() === closeSessionId) {
+        const closeSessionId = this.context.resolveSessionId
+          ? this.context.resolveSessionId(rawCloseId)
+          : rawCloseId;
+        const result = await this.context.closeSession(closeSessionId, args.force as boolean | undefined);
+        // Only forget the default when the session actually went away.
+        const closed = !result || result.closed;
+        if (closed && this.context.getDefaultSessionId() === closeSessionId) {
           this.context.setDefaultSessionId(null);
         }
-        return { success: true };
+        return result ?? { closed: true, sessionId: closeSessionId, clientCount: 0 };
       }
 
       case 'set_default_session': {
@@ -439,6 +459,25 @@ export class GhidraToolHandler {
       });
     }
 
+    // Repository-scoped tools act on the server, not on a program, so they must work
+    // before any session exists — that is the whole point of being able to discover what
+    // is on the server. Fall back to the daemon's repo worker.
+    const REPO_TOOLS = new Set([
+      'list_repos', 'import_program', 'import_status', 'delete_program', 'move_program',
+    ]);
+    const repoScoped = REPO_TOOLS.has(toolName) || toolName === 'list_programs';
+    if (repoScoped && !args.repo && this.context.getDefaultRepo?.()) {
+      args = { ...args, repo: this.context.getDefaultRepo() };
+    }
+    const needsRepoWorker = REPO_TOOLS.has(toolName)
+      || (toolName === 'list_programs' && typeof args.repo === 'string');
+    if (!sessionId && needsRepoWorker) {
+      if (!this.context.getRepoSession) {
+        throw new Error('Repository access is not available in this context');
+      }
+      sessionId = await this.context.getRepoSession();
+    }
+
     // All other tools require a session
     if (!sessionId) {
       throw new Error(
@@ -577,7 +616,69 @@ export class GhidraToolHandler {
     switch (toolName) {
       // Multi-program management
       case 'list_programs':
-        return { id, command: 'list_programs', params: {}, timeout };
+        return {
+          id,
+          command: 'list_programs',
+          params: {
+            repo: params.repo as string | undefined,
+            folder: params.folder as string | undefined,
+            recursive: params.recursive as boolean | undefined,
+            filter: params.filter as string | undefined,
+          },
+          timeout,
+        };
+
+      case 'import_program':
+        return {
+          id,
+          command: 'import_program',
+          params: {
+            repo: params.repo as string | undefined,
+            items: params.items as ImportSpecParams[] | undefined,
+            url: params.url as string | undefined,
+            localPath: params.localPath as string | undefined,
+            bytesBase64: params.bytesBase64 as string | undefined,
+            programPath: params.programPath as string | undefined,
+            processor: params.processor as string | undefined,
+            compilerSpec: params.compilerSpec as string | undefined,
+            analyze: params.analyze as boolean | undefined,
+            overwrite: params.overwrite as boolean | undefined,
+            wait: params.wait as boolean | undefined,
+            waitTimeout: params.waitTimeout as number | undefined,
+          },
+          timeout,
+        };
+
+      case 'import_status':
+        return {
+          id,
+          command: 'import_status',
+          params: { jobId: params.jobId as string | undefined },
+          timeout,
+        };
+
+      case 'delete_program':
+        return {
+          id,
+          command: 'delete_program',
+          params: {
+            repo: params.repo as string | undefined,
+            programPath: params.programPath as string,
+          },
+          timeout,
+        };
+
+      case 'move_program':
+        return {
+          id,
+          command: 'move_program',
+          params: {
+            repo: params.repo as string | undefined,
+            from: params.from as string,
+            to: params.to as string,
+          },
+          timeout,
+        };
 
       case 'load_program':
         return {

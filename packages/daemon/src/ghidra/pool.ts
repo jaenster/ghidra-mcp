@@ -58,6 +58,7 @@ interface PendingCommand {
 interface GhidraServerSpawnOptions {
   host: string;
   port: number;
+  /** Empty for a repo worker: it connects to the server without opening anything. */
   repo: string;
   programPath: string;
   serverUser: string;
@@ -277,11 +278,17 @@ export class WorkerPool {
       const srv = options.ghidraServer;
       args.push(
         '--ghidra-server', `${srv.host}:${srv.port}`,
-        '--repo', srv.repo,
-        '--program', srv.programPath,
         '--server-user', srv.serverUser,
         '--project', projectDir,
       );
+      // No program means repo mode: connect only, so the worker can serve discovery and
+      // imports before any program has been chosen.
+      if (srv.repo) {
+        args.push('--repo', srv.repo);
+      }
+      if (srv.programPath) {
+        args.push('--program', srv.programPath);
+      }
       serverPasswordEnv = srv.serverPassword;
     } else {
       args.push(

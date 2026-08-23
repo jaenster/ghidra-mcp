@@ -15,6 +15,13 @@ import { getProjectsDir } from '@ghidra-mcp/shared/platform';
 import type { StateDatabase } from '../state/database.js';
 import type { WorkerPool } from '../ghidra/pool.js';
 
+export interface CloseSessionResult {
+  closed: boolean;
+  sessionId: string;
+  clientCount: number;
+  message?: string;
+}
+
 export interface SessionCreateOptions {
   autoAnalyze?: boolean;
   analysisTimeout?: number;
@@ -25,6 +32,10 @@ export interface SessionCreateOptions {
 export class SessionManager {
   private sessions = new Map<string, SessionState>();
   private initialized = false;
+  private repoSessionId?: string;
+  private repoSessionPromise?: Promise<string>;
+  private repoReaper?: NodeJS.Timeout;
+  private repoProgramCache = new Map<string, { paths: string[]; at: number }>();
 
   constructor(
     private database: StateDatabase,
@@ -216,26 +227,61 @@ export class SessionManager {
   }
 
   /**
-   * Create a new session for a binary
+   * The Ghidra Server this daemon speaks for. The server identity is owned by the daemon,
+   * never by the client: clients name a program, not a host.
+   */
+  private serverDefaults(): { host?: string; port: number; repo?: string; user: string } {
+    return {
+      host: process.env.GHIDRA_SERVER_HOST,
+      port: Number(process.env.GHIDRA_SERVER_PORT ?? '13100'),
+      repo: process.env.GHIDRA_SERVER_REPO,
+      user: process.env.GHIDRA_SERVER_USER ?? 'mcp',
+    };
+  }
+
+  /** True when workers run somewhere that cannot see this daemon's (or the client's) disk. */
+  private workersAreRemote(): boolean {
+    return (process.env.GHIDRA_MCP_WORKER_BACKEND ?? 'process') !== 'process';
+  }
+
+  /**
+   * Open a session on a program.
+   *
+   * `target` is a program in the shared repository — either a bare path resolved against
+   * the configured server and repo, `REPO/path`, or a full ghidra:// URL for a different
+   * server — or a local .gpr project when workers run on this machine.
+   *
+   * Loose binaries are deliberately NOT accepted: importing one into a per-session project
+   * produced a program that died with the session. Use import_program to put a binary in
+   * the repository, then open it like any other program.
    */
   async createSession(
-    binaryPath: string,
+    target: string,
     options?: SessionCreateOptions
   ): Promise<Session> {
-    // Ghidra Server (shared repository) session. binaryPath may be:
-    //   1. host-qualified URL:  ghidra://HOST[:PORT]/REPO/program/path
-    //   2. scheme + repo path:  ghidra://REPO/program/path            (no host)
-    //   3. bare repo path:      REPO/program/path                     (no scheme)
-    // Forms 2 & 3 are resolved against GHIDRA_SERVER_HOST/PORT so clients never need
-    // to type the server host — the daemon owns the server identity via env vars
-    // (GHIDRA_SERVER_HOST/PORT/USER/PASSWORD). Credentials always come from env, never the URL.
-    const defaultHost = process.env.GHIDRA_SERVER_HOST;
-    const port = process.env.GHIDRA_SERVER_PORT ?? '13100';
-    const looksLocal = binaryPath.startsWith('/') || /^[A-Za-z]:[/\\]/.test(binaryPath)
-      || binaryPath.endsWith('.gpr') || binaryPath.startsWith('.');
+    const resolved = await this.resolveTarget(target);
+    if (resolved.kind === 'server') {
+      return this.createServerSession(resolved.url, options);
+    }
+    return this.createLocalProjectSession(resolved.path, options);
+  }
 
-    if (binaryPath.startsWith('ghidra://')) {
-      const afterScheme = binaryPath.slice('ghidra://'.length);
+  /**
+   * Work out what a client meant by the path it passed.
+   *
+   * ghidra:// URLs are taken as given (host-less ones resolve against the configured
+   * server). Everything else is a repository path — including one with a leading slash,
+   * which is repo-relative, not a filesystem path. A real local path is only meaningful
+   * for a .gpr project on a machine the worker can actually read; anything else gets an
+   * error that says why rather than blaming the file.
+   */
+  private async resolveTarget(
+    target: string
+  ): Promise<{ kind: 'server'; url: string } | { kind: 'localProject'; path: string }> {
+    const { host, port, repo: defaultRepo } = this.serverDefaults();
+
+    if (target.startsWith('ghidra://')) {
+      const afterScheme = target.slice('ghidra://'.length);
       const firstSeg = afterScheme.split('/')[0];
       // A real host segment carries a port (':'), a dotted FQDN/IP ('.'), credentials
       // ('@'), or is 'localhost'. Otherwise the first segment is a REPO name and the
@@ -243,32 +289,156 @@ export class SessionManager {
       const hostQualified = firstSeg.includes(':') || firstSeg.includes('.')
         || firstSeg.includes('@') || firstSeg === 'localhost';
       if (hostQualified) {
-        return this.createServerSession(binaryPath, options);
+        return { kind: 'server', url: target };
       }
-      if (!defaultHost) {
+      if (!host) {
         throw new Error('Host-less ghidra:// path but no GHIDRA_SERVER_HOST configured — '
           + 'set GHIDRA_SERVER_HOST or pass a full ghidra://host:port/repo/... URL.');
       }
-      return this.createServerSession(`ghidra://${defaultHost}:${port}/${afterScheme}`, options);
+      return { kind: 'server', url: `ghidra://${host}:${port}/${afterScheme}` };
     }
 
-    if (defaultHost && !looksLocal) {
-      return this.createServerSession(`ghidra://${defaultHost}:${port}/${binaryPath}`, options);
+    const expanded = target.startsWith('~')
+      ? path.join(process.env.HOME ?? '', target.slice(1))
+      : target;
+
+    if (expanded.endsWith('.gpr')) {
+      if (this.workersAreRemote()) {
+        throw new Error(this.remotePathError(expanded));
+      }
+      const resolvedPath = path.resolve(expanded);
+      if (!fs.existsSync(resolvedPath)) {
+        throw new Error(`Ghidra project not found: ${resolvedPath}`);
+      }
+      return { kind: 'localProject', path: resolvedPath };
     }
 
-    // Validate binary exists
-    const resolvedPath = path.resolve(binaryPath);
-    if (!fs.existsSync(resolvedPath)) {
-      throw new Error(`Binary not found: ${resolvedPath}`);
+    if (!host) {
+      throw new Error(
+        `No Ghidra Server configured (GHIDRA_SERVER_HOST is unset), so "${target}" cannot be `
+        + 'resolved to a program. Point the daemon at a server, or pass a local .gpr project path.'
+      );
     }
 
-    // Compute binary hash
+    // A path that exists on this machine is a strong hint the caller meant a local file.
+    // Say so explicitly, because "not found" for a file they can see is the worst answer.
+    if (this.workersAreRemote() && (expanded.startsWith('/') || expanded.startsWith('./')
+        || /^[A-Za-z]:[/\\]/.test(expanded)) && fs.existsSync(expanded)) {
+      throw new Error(this.remotePathError(expanded));
+    }
+
+    const { repo, programPath } = await this.resolveRepoPath(expanded, defaultRepo);
+    return { kind: 'server', url: `ghidra://${host}:${port}/${repo}${programPath}` };
+  }
+
+  /**
+   * Explain that the worker is elsewhere, naming the server it IS connected to, and point
+   * at the two ways forward.
+   */
+  private remotePathError(localPath: string): string {
+    const { host, port, repo } = this.serverDefaults();
+    const server = host ? `${host}:${port}` : 'its configured Ghidra Server';
+    const example = repo ? `create_session program="/path/in/${repo}"` : 'create_session program="Repo/path"';
+    return (
+      `The worker runs on a different machine and cannot read your local filesystem, so `
+      + `"${localPath}" is unreachable from it. It is connected to Ghidra Server ${server}. `
+      + `Open a program from there instead (${example}, or list_repos / list_programs to see `
+      + `what is on it), or put this file on the server with import_program.`
+    );
+  }
+
+  /**
+   * Split a repository path into repo + program path.
+   *
+   * "/windows/1.09d/D2Game.dll" is repo-relative to GHIDRA_SERVER_REPO; "Repo/a/b" names its
+   * repo explicitly. Where the server can be reached, the guess is checked against what is
+   * actually there, and a path that matches exactly one program by suffix is accepted — so
+   * the shorthand a listing suggests ("1.09d/D2Game.dll") opens without ceremony.
+   */
+  private async resolveRepoPath(
+    input: string,
+    defaultRepo?: string
+  ): Promise<{ repo: string; programPath: string }> {
+    const trimmed = input.replace(/^\/+/, '');
+    const explicitlyRelative = input.startsWith('/');
+    const [firstSegment, ...rest] = trimmed.split('/');
+
+    const candidates: Array<{ repo: string; programPath: string }> = [];
+    if (defaultRepo) {
+      candidates.push({ repo: defaultRepo, programPath: `/${trimmed}` });
+    }
+    if (!explicitlyRelative && rest.length > 0 && firstSegment !== defaultRepo) {
+      candidates.push({ repo: firstSegment, programPath: `/${rest.join('/')}` });
+    }
+    if (candidates.length === 0) {
+      throw new Error(
+        `Cannot tell which repository "${input}" is in: no GHIDRA_SERVER_REPO is configured and `
+        + 'the path does not start with a repository name. Set GHIDRA_SERVER_REPO, or pass '
+        + '"Repo/path/to/program". Use list_repos to see what is available.'
+      );
+    }
+
+    // Verify against the server when we can. If discovery is unavailable (server down, no
+    // spare worker) fall back to the first guess rather than refusing to open anything.
+    let known: Array<{ repo: string; paths: string[] }>;
+    try {
+      known = await Promise.all(candidates.map(async (c) => ({
+        repo: c.repo,
+        paths: await this.listRepoProgramPaths(c.repo),
+      })));
+    } catch (err) {
+      console.warn(`[SessionManager] Could not verify program path against the server: `
+        + `${err instanceof Error ? err.message : String(err)}`);
+      return candidates[0];
+    }
+
+    for (const candidate of candidates) {
+      const entry = known.find((k) => k.repo === candidate.repo);
+      if (entry?.paths.includes(candidate.programPath)) {
+        return candidate;
+      }
+    }
+
+    // Nothing matched exactly — try a unique suffix match, which is what a half-remembered
+    // path from a listing looks like.
+    const suffix = `/${trimmed}`.toLowerCase();
+    const matches: Array<{ repo: string; programPath: string }> = [];
+    for (const entry of known) {
+      for (const p of entry.paths) {
+        if (p.toLowerCase().endsWith(suffix)) {
+          matches.push({ repo: entry.repo, programPath: p });
+        }
+      }
+    }
+    if (matches.length === 1) {
+      return matches[0];
+    }
+    if (matches.length > 1) {
+      const shown = matches.slice(0, 10).map((m) => `${m.repo}${m.programPath}`).join(', ');
+      throw new Error(
+        `"${input}" matches ${matches.length} programs: ${shown}`
+        + `${matches.length > 10 ? ', …' : ''}. Pass the full path.`
+      );
+    }
+    throw new Error(
+      `No program "${input}" in ${candidates.map((c) => c.repo).join(' or ')}. `
+      + 'Use list_programs (it needs no session) to see what is there.'
+    );
+  }
+
+  /**
+   * Open a session on a local .gpr project. Long-lived by nature — the project outlives the
+   * session, which is exactly why loose binaries are not accepted here.
+   */
+  private async createLocalProjectSession(
+    resolvedPath: string,
+    options?: SessionCreateOptions
+  ): Promise<Session> {
     const binaryHash = await this.computeFileHash(resolvedPath);
-
     const programPath = options?.programPath;
 
-    // Check for existing session with same binary AND programPath
-    // For .gpr projects, different programPaths should create different sessions
+    // Check for existing session with same project AND programPath
+    // Different programPaths within one .gpr are different sessions.
     const emptyHash = crypto.createHash('sha256').digest('hex');
     for (const [id, state] of this.sessions) {
       const pathMatch = state.binaryPath === resolvedPath || (binaryHash !== emptyHash && state.binaryHash === binaryHash);
@@ -289,7 +459,7 @@ export class SessionManager {
 
     // For .gpr projects with programPath, try to reuse an existing worker for the same .gpr
     let existingWorkerId: string | undefined;
-    if (resolvedPath.endsWith('.gpr') && programPath) {
+    if (programPath) {
       for (const [, existingState] of this.sessions) {
         if (existingState.binaryPath === resolvedPath && existingState.workerId && existingState.status === 'ready') {
           existingWorkerId = existingState.workerId;
@@ -298,7 +468,6 @@ export class SessionManager {
       }
     }
 
-    // Create new session
     const sessionId = shortId();
     const projectPath = existingWorkerId
       ? resolvedPath  // reusing worker, use the .gpr path as project path
@@ -475,6 +644,133 @@ export class SessionManager {
     }
   }
 
+  // =========================================================================
+  // Repo session — a worker connected to the server with nothing open
+  // =========================================================================
+
+  /**
+   * A worker that is connected to the Ghidra Server but has no project or program open.
+   * It exists so the server can be browsed and written to before any program has been
+   * chosen: list_repos, list_programs, import_program, delete_program and move_program all
+   * run on it. Created on first use and reaped once it goes idle.
+   */
+  async getRepoSession(): Promise<string> {
+    if (this.repoSessionId && this.sessions.get(this.repoSessionId)?.status === 'ready') {
+      this.sessions.get(this.repoSessionId)!.lastAccessedAt = new Date();
+      return this.repoSessionId;
+    }
+    if (!this.repoSessionPromise) {
+      this.repoSessionPromise = this.spawnRepoSession().finally(() => {
+        this.repoSessionPromise = undefined;
+      });
+    }
+    return this.repoSessionPromise;
+  }
+
+  private async spawnRepoSession(): Promise<string> {
+    const { host, port, user } = this.serverDefaults();
+    if (!host) {
+      throw new Error(
+        'No Ghidra Server configured (GHIDRA_SERVER_HOST is unset), so there is no repository '
+        + 'to browse. Set GHIDRA_SERVER_HOST/PORT/USER/PASSWORD on the daemon.'
+      );
+    }
+
+    // Drop a dead one first so a crashed repo worker doesn't wedge discovery forever.
+    if (this.repoSessionId) {
+      this.sessions.delete(this.repoSessionId);
+      this.repoSessionId = undefined;
+    }
+
+    const sessionId = shortId();
+    const ghidraServer: GhidraServerInfo = {
+      host,
+      port,
+      repo: '',
+      programPath: '',
+      serverUser: user,
+      serverPassword: process.env.GHIDRA_SERVER_PASSWORD,
+    };
+    const state: SessionState = {
+      binaryPath: `ghidra://${host}:${port}/`,
+      binaryHash: '',
+      createdAt: new Date(),
+      lastAccessedAt: new Date(),
+      status: 'starting',
+      clientCount: 0,
+      projectPath: path.join(getProjectsDir(), sessionId),
+      ghidraServer,
+      isRepoSession: true,
+    };
+    this.sessions.set(sessionId, state);
+
+    try {
+      const workerId = await this.workerPool.spawnWorker(sessionId, {
+        binaryPath: state.binaryPath,
+        projectPath: state.projectPath,
+        autoAnalyze: false,
+        ghidraServer,
+      });
+      state.workerId = workerId;
+      await this.workerPool.waitForReady(workerId);
+      state.status = 'ready';
+      this.repoSessionId = sessionId;
+      this.startRepoSessionReaper();
+      return sessionId;
+    } catch (error) {
+      this.sessions.delete(sessionId);
+      throw error;
+    }
+  }
+
+  /**
+   * Shut the repo worker down once nobody has used it for a while — it is a whole JVM and
+   * discovery is bursty.
+   */
+  private startRepoSessionReaper(): void {
+    if (this.repoReaper) return;
+    const idleMs = Number(process.env.GHIDRA_MCP_REPO_SESSION_IDLE_MS ?? '600000');
+    this.repoReaper = setInterval(() => {
+      const id = this.repoSessionId;
+      if (!id) return;
+      const state = this.sessions.get(id);
+      if (!state) {
+        this.repoSessionId = undefined;
+        return;
+      }
+      if (Date.now() - state.lastAccessedAt.getTime() < idleMs) return;
+      console.log(`[SessionManager] Reaping idle repo session ${id}`);
+      this.repoSessionId = undefined;
+      this.sessions.delete(id);
+      if (state.workerId) {
+        this.workerPool.shutdownWorker(state.workerId).catch(() => {});
+      }
+    }, 60_000);
+    this.repoReaper.unref();
+  }
+
+  /** Program paths in a repository, cached briefly so path resolution stays cheap. */
+  async listRepoProgramPaths(repo: string): Promise<string[]> {
+    const cached = this.repoProgramCache.get(repo);
+    if (cached && Date.now() - cached.at < 60_000) {
+      return cached.paths;
+    }
+    const sessionId = await this.getRepoSession();
+    const response = await this.sendCommand(sessionId, {
+      id: crypto.randomUUID(),
+      command: 'list_programs',
+      params: { repo, recursive: true },
+      timeout: 60_000,
+    });
+    if (!response.success) {
+      throw new Error(response.error?.message ?? `Could not list repository ${repo}`);
+    }
+    const programs = (response.result as { programs?: Array<{ path: string }> })?.programs ?? [];
+    const paths = programs.map((p) => p.path);
+    this.repoProgramCache.set(repo, { paths, at: Date.now() });
+    return paths;
+  }
+
   /**
    * Resolve a session ID or alias to an actual session UUID.
    */
@@ -520,30 +816,48 @@ export class SessionManager {
   }
 
   /**
-   * Close a session
+   * Close a session.
+   *
+   * A session shared by several clients is reference-counted, so a close often only
+   * decrements. That used to be reported as plain success, which read as "closed" while the
+   * session was still running and still listed — so the result now says which of the two
+   * happened, and `force` closes regardless of who else holds it.
    */
-  async closeSession(sessionId: string): Promise<void> {
+  async closeSession(sessionId: string, force = false): Promise<CloseSessionResult> {
     const state = this.sessions.get(sessionId);
     if (!state) {
       throw new Error(`Session not found: ${sessionId}`);
     }
 
-    state.clientCount--;
+    state.clientCount = Math.max(0, state.clientCount - 1);
 
-    if (state.clientCount <= 0) {
-      state.status = 'closing';
-
-      // Shutdown worker
-      if (state.workerId) {
-        await this.workerPool.shutdownWorker(state.workerId);
-      }
-
-      // Remove session and its aliases
-      this.sessions.delete(sessionId);
-      this.database.deleteSession(sessionId);
-      this.database.deletePersistedSession(sessionId);
-      this.database.removeAliasesForSession(sessionId);
+    if (state.clientCount > 0 && !force) {
+      return {
+        closed: false,
+        sessionId,
+        clientCount: state.clientCount,
+        message: `Session still open: ${state.clientCount} other client(s) hold it. `
+          + 'Pass force=true to close it anyway.',
+      };
     }
+
+    state.status = 'closing';
+
+    // Shutdown worker
+    if (state.workerId) {
+      await this.workerPool.shutdownWorker(state.workerId);
+    }
+
+    // Remove session and its aliases
+    this.sessions.delete(sessionId);
+    this.database.deleteSession(sessionId);
+    this.database.deletePersistedSession(sessionId);
+    this.database.removeAliasesForSession(sessionId);
+    if (this.repoSessionId === sessionId) {
+      this.repoSessionId = undefined;
+    }
+
+    return { closed: true, sessionId, clientCount: 0 };
   }
 
   /**
@@ -729,6 +1043,7 @@ export class SessionManager {
         ? this.workerPool.getWorkerPid(state.workerId)
         : undefined,
       aliases: aliases.length > 0 ? aliases : undefined,
+      repoSession: state.isRepoSession || undefined,
     };
   }
 
@@ -877,6 +1192,8 @@ interface SessionState {
   respawnPromise?: Promise<void>;
   lastRespawnAt?: number;
   ghidraServer?: GhidraServerInfo;
+  /** Internal worker with nothing open, used for repository browsing and imports. */
+  isRepoSession?: boolean;
 }
 
 /**

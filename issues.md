@@ -10,16 +10,16 @@ rather than re-discovered. The two at the top are the ones that cost the most ti
 Worked top to bottom, one commit per item.
 
 **A. Repo-first session model (issue 1 + drop the short-lived local-import path)**
-- [ ] A1 `GHIDRA_SERVER_REPO` default repo; bare `program=` paths resolve against it
-- [ ] A2 remove loose-binary sessions (throwaway per-session project); `.gpr` and `ghidra://` remain
-- [ ] A3 local path gives the real reason, naming the host the worker is connected to
-- [ ] A4 `list_repos` / `list_programs` work with no session
+- [x] A1 `GHIDRA_SERVER_REPO` default repo; bare `program=` paths resolve against it
+- [x] A2 remove loose-binary sessions (throwaway per-session project); `.gpr` and `ghidra://` remain
+- [x] A3 local path gives the real reason, naming the host the worker is connected to
+- [x] A4 `list_repos` / `list_programs` work with no session
 
 **B. Getting binaries in (issue 2)**
-- [ ] B1 `import_program` — URL or uploaded bytes → repo path
-- [ ] B2 batch form (many files / directory + path template)
+- [x] B1 `import_program` — URL or uploaded bytes → repo path
+- [x] B2 batch form (many files / directory + path template)
 - [ ] B3 analysis startable + pollable, not held open on one request
-- [ ] B4 `delete_program` / `move_program`
+- [x] B4 `delete_program` / `move_program`
 
 **C. Name resolution (issue 3)**
 - [ ] C1 accept fully namespaced names wherever names are accepted
@@ -43,7 +43,7 @@ Worked top to bottom, one commit per item.
 - [ ] F8 `delete_namespace` removes the empty shell
 
 **G. Sessions (issue 7)**
-- [ ] G1 `close_session` reports refcount vs. actual close, and takes `force`
+- [x] G1 `close_session` reports refcount vs. actual close, and takes `force`
 
 ---
 

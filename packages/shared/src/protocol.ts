@@ -139,6 +139,11 @@ export type WorkerCommand =
   | GetSymbolAfterCommand
   // Multi-program commands
   | ListProgramsCommand
+  // Repository commands
+  | ImportProgramCommand
+  | ImportStatusCommand
+  | DeleteProgramCommand
+  | MoveProgramCommand
   // Version Tracking commands
   | VtCreateSessionCommand
   | VtRunCorrelatorCommand
@@ -990,7 +995,66 @@ export interface ImportTypeArchiveCommand extends BaseCommand {
 // Multi-program commands
 export interface ListProgramsCommand extends BaseCommand {
   command: 'list_programs';
-  params: Record<string, never>;
+  params: {
+    /** Repository to list off the server; without it, the session's open project is listed. */
+    repo?: string;
+    folder?: string;
+    recursive?: boolean;
+    filter?: string;
+  };
+}
+
+// Repository commands — these act on the Ghidra Server, not on an open program
+export interface ImportSpecParams {
+  url?: string;
+  localPath?: string;
+  bytesBase64?: string;
+  programPath?: string;
+  processor?: string;
+  compilerSpec?: string;
+}
+
+export interface ImportProgramCommand extends BaseCommand {
+  command: 'import_program';
+  params: {
+    repo?: string;
+    /** Several binaries in one job; a single import may instead be given inline. */
+    items?: ImportSpecParams[];
+    url?: string;
+    localPath?: string;
+    bytesBase64?: string;
+    programPath?: string;
+    processor?: string;
+    compilerSpec?: string;
+    analyze?: boolean;
+    overwrite?: boolean;
+    wait?: boolean;
+    waitTimeout?: number;
+  };
+}
+
+export interface ImportStatusCommand extends BaseCommand {
+  command: 'import_status';
+  params: {
+    jobId?: string;
+  };
+}
+
+export interface DeleteProgramCommand extends BaseCommand {
+  command: 'delete_program';
+  params: {
+    repo?: string;
+    programPath: string;
+  };
+}
+
+export interface MoveProgramCommand extends BaseCommand {
+  command: 'move_program';
+  params: {
+    repo?: string;
+    from: string;
+    to: string;
+  };
 }
 
 // Version Tracking commands

@@ -96,18 +96,26 @@ export const sessionTools: ToolDefinition[] = [
 
   defineTool(
     'create_session',
-    'Create a new Ghidra session for analyzing a binary or open an existing Ghidra project. ' +
-    'Pass a binary path to import and analyze, or a .gpr file path to open an existing project. ' +
-    'For .gpr projects with multiple programs, specify programPath to select which one to load. ' +
-    'Pass a ghidra://[user:password@]host:port/repo/program/path URL to open a shared program from a Ghidra Server.',
+    'Open a program from the Ghidra Server and start a session on it. ' +
+    'Name the program by its path in the repository — "/windows/1.09d/D2Game.dll" is relative to the ' +
+    'configured repository, "Repo/windows/1.09d/D2Game.dll" names the repository explicitly, and a path ' +
+    'that matches exactly one program (e.g. "1.09d/D2Game.dll") is accepted as shorthand. ' +
+    'Use list_repos and list_programs (neither needs a session) to see what is available. ' +
+    'A full ghidra://[user:password@]host[:port]/repo/program/path URL opens a program on a different ' +
+    'server; the port defaults to 13100. ' +
+    'To analyse a binary that is not on the server yet, put it there with import_program first.',
     {
+      program: {
+        type: 'string',
+        description: 'Program path in the repository (e.g. "/windows/1.09d/D2Game.dll" or "Repo/windows/1.09d/D2Game.dll")',
+      },
       binaryPath: {
         type: 'string',
-        description: 'Path to the binary file to analyze, a path to an existing .gpr project file, or a ghidra://[user:password@]host:port/repo/program URL for a Ghidra Server shared program',
+        description: 'Alternative to program: a ghidra://host[:port]/repo/program URL, or a local .gpr project path when the worker runs on this machine',
       },
       programPath: {
         type: 'string',
-        description: 'Path of program within .gpr project (e.g., "/windows/1.14d/Game.exe"). Required when project has multiple programs.',
+        description: 'Program to select within a local .gpr project that holds several',
       },
       autoAnalyze: {
         type: 'boolean',
@@ -117,15 +125,25 @@ export const sessionTools: ToolDefinition[] = [
         type: 'number',
         description: 'Maximum time for analysis in milliseconds (default: 300000)',
       },
-    },
-    ['binaryPath']
+      readOnly: {
+        type: 'boolean',
+        description: 'Open without checking the program out, so nothing can be written back (default: false)',
+      },
+    }
   ),
 
   defineTool(
     'close_session',
-    'Close a Ghidra session and terminate its worker process.',
+    'Close a Ghidra session and terminate its worker process. ' +
+    'Sessions are reference-counted: if other clients still hold this one, the call only ' +
+    'decrements and reports closed=false with the remaining clientCount — pass force to close ' +
+    'it regardless.',
     {
       ...sessionIdProp,
+      force: {
+        type: 'boolean',
+        description: 'Close even if other clients still hold the session (default: false)',
+      },
     },
     ['sessionId']
   ),
@@ -373,7 +391,8 @@ export const sharedStructureTools: ToolDefinition[] = [
 export const multiProgramTools: ToolDefinition[] = [
   defineTool(
     'list_repos',
-    'List all repositories available on the configured Ghidra Server. Requires an active server session.',
+    'List the repositories on the configured Ghidra Server. Needs no session — use it to see ' +
+    'what is available before opening anything.',
     {
       ...sessionIdProp,
     }
@@ -381,10 +400,150 @@ export const multiProgramTools: ToolDefinition[] = [
 
   defineTool(
     'list_programs',
-    'List all programs in the open Ghidra project (.gpr). Shows which are loaded.',
+    'List programs. With a repo (or with a repository configured on the daemon) this reads the ' +
+    'Ghidra Server directly and needs no session, so it works before any program is open. ' +
+    'Without one it lists the programs in the session\'s open project and shows which are loaded.',
     {
       ...sessionIdProp,
+      repo: {
+        type: 'string',
+        description: 'Repository to list (defaults to the daemon\'s configured repository)',
+      },
+      folder: {
+        type: 'string',
+        description: 'Folder within the repository to list (default: "/")',
+      },
+      recursive: {
+        type: 'boolean',
+        description: 'Descend into subfolders (default: true)',
+      },
+      filter: {
+        type: 'string',
+        description: 'Case-insensitive substring the program path must contain',
+      },
     }
+  ),
+
+  defineTool(
+    'import_program',
+    'Import one or more binaries into a Ghidra Server repository, so they can then be opened ' +
+    'with create_session. The WORKER fetches the bytes, so give it a url it can reach (or a ' +
+    'localPath on the worker host, or inline bytesBase64) — the worker cannot read the client\'s disk. ' +
+    'Analysis is slow, so the import runs as a background job: it returns a jobId immediately, ' +
+    'which import_status polls. Pass items to import many in one call.',
+    {
+      ...sessionIdProp,
+      repo: {
+        type: 'string',
+        description: 'Target repository (defaults to the daemon\'s configured repository)',
+      },
+      url: {
+        type: 'string',
+        description: 'URL for the worker to fetch the binary from',
+      },
+      localPath: {
+        type: 'string',
+        description: 'Path to the binary ON THE WORKER HOST (only useful when the worker runs locally)',
+      },
+      bytesBase64: {
+        type: 'string',
+        description: 'The binary itself, base64-encoded. Fine for small files; prefer url for big ones.',
+      },
+      programPath: {
+        type: 'string',
+        description: 'Where it lands in the repository, e.g. "/windows/1.09d/Game.exe"',
+      },
+      processor: {
+        type: 'string',
+        description: 'Language ID to force, e.g. "x86:LE:32:default" (omit to let Ghidra detect it)',
+      },
+      compilerSpec: {
+        type: 'string',
+        description: 'Compiler spec ID to pair with processor, e.g. "windows" (default: the language default)',
+      },
+      items: {
+        type: 'array',
+        description: 'Several binaries in one job; each entry takes url/localPath/bytesBase64, programPath, processor, compilerSpec',
+        items: {
+          type: 'object',
+          properties: {
+            url: { type: 'string' },
+            localPath: { type: 'string' },
+            bytesBase64: { type: 'string' },
+            programPath: { type: 'string' },
+            processor: { type: 'string' },
+            compilerSpec: { type: 'string' },
+          },
+        },
+      },
+      analyze: {
+        type: 'boolean',
+        description: 'Run auto-analysis on each imported program (default: true)',
+      },
+      overwrite: {
+        type: 'boolean',
+        description: 'Replace a program already at that path (default: false)',
+      },
+      wait: {
+        type: 'boolean',
+        description: 'Hold the request until the job finishes instead of returning a jobId (default: false)',
+      },
+      waitTimeout: {
+        type: 'number',
+        description: 'How long to hold the request when wait is set, in ms (default: 600000)',
+      },
+    }
+  ),
+
+  defineTool(
+    'import_status',
+    'Check an import job started by import_program. Omit jobId to list every job this worker knows about.',
+    {
+      ...sessionIdProp,
+      jobId: {
+        type: 'string',
+        description: 'Job to report on (omit for all)',
+      },
+    }
+  ),
+
+  defineTool(
+    'delete_program',
+    'Delete a program from a Ghidra Server repository. Refuses to delete a program a session has open.',
+    {
+      ...sessionIdProp,
+      repo: {
+        type: 'string',
+        description: 'Repository (defaults to the daemon\'s configured repository)',
+      },
+      programPath: {
+        type: 'string',
+        description: 'Program to delete, e.g. "/windows/1.09d/Game.exe"',
+      },
+    },
+    ['programPath']
+  ),
+
+  defineTool(
+    'move_program',
+    'Move or rename a program within a Ghidra Server repository — for fixing an import that landed ' +
+    'in the wrong place. Refuses to move a program a session has open.',
+    {
+      ...sessionIdProp,
+      repo: {
+        type: 'string',
+        description: 'Repository (defaults to the daemon\'s configured repository)',
+      },
+      from: {
+        type: 'string',
+        description: 'Current program path',
+      },
+      to: {
+        type: 'string',
+        description: 'New program path (folders are created as needed)',
+      },
+    },
+    ['from', 'to']
   ),
 
   defineTool(

@@ -19,6 +19,8 @@ export interface Session {
   workerPid?: number;
   status: SessionStatus;
   aliases?: string[];
+  /** Internal worker connected to the Ghidra Server with nothing open (repo browsing/imports). */
+  repoSession?: boolean;
 }
 
 export type SessionStatus = 'starting' | 'analyzing' | 'ready' | 'error' | 'closing';
