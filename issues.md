@@ -11,7 +11,7 @@ Worked top to bottom, one commit per item.
 
 **A. Repo-first session model (issue 1 + drop the short-lived local-import path)**
 - [x] A1 `GHIDRA_SERVER_REPO` default repo; bare `program=` paths resolve against it
-- [x] A2 loose-binary sessions refused whenever a server is configured (throwaway project, dies with the session) — kept only for pure-local mode, where there is nothing shared to import into
+- [x] A2 loose-binary sessions removed outright — a session opens a repo program or a local `.gpr`; the import path into a per-session project is gone from the worker too
 - [x] A3 local path gives the real reason, naming the host the worker is connected to
 - [x] A4 `list_repos` / `list_programs` work with no session
 
@@ -52,6 +52,10 @@ predate this work and reproduce on a clean tree).
 **Not verifiable here** — no Ghidra Server on this machine: repo mode (A4), `import_program`,
 `delete_program`, `move_program`. These compile and are wired end to end, but want a run
 against the real server.
+
+The e2e fixtures are now pre-analysed `.gpr` projects (`npm run fixtures:ghidra`), since a
+session can no longer open a loose binary. They run serially: the suites share those
+projects and Ghidra locks a project exclusively.
 
 ---
 

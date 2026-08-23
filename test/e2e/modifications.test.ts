@@ -13,7 +13,8 @@ import { describe, it, before, after, afterEach } from 'node:test';
 import assert from 'node:assert';
 import {
   startTestDaemon,
-  getTestBinaryPath,
+  getTestProgramPath,
+  hasGhidraProjects,
   cleanupAllDaemons,
   type DaemonHandle,
 } from './helpers/daemon.ts';
@@ -43,7 +44,13 @@ const ANALYSIS_TIMEOUT = 180_000;
 const SUITE_TIMEOUT = 600_000;
 
 const GHIDRA_HOME = process.env.GHIDRA_HOME;
-const SKIP_REASON = !GHIDRA_HOME ? 'GHIDRA_HOME not set' : undefined;
+const SKIP_REASON = !GHIDRA_HOME
+  ? 'GHIDRA_HOME not set'
+  // Sessions open a Ghidra project, never a loose binary, so the pre-analysed fixtures
+  // are a hard requirement now rather than an optimisation.
+  : !hasGhidraProjects()
+    ? "No test Ghidra projects — run 'npm run fixtures:build' then 'npm run fixtures:ghidra'"
+    : undefined;
 
 after(async () => {
   await cleanupAllDaemons();
@@ -63,7 +70,7 @@ describe('E2E: Modification Tools', { skip: SKIP_REASON, timeout: SUITE_TIMEOUT 
     // Set output format to JSON for easier parsing in tests
     await client.callTool('set_output_format', { format: 'json' });
 
-    binaryPath = getTestBinaryPath('simple_main');
+    binaryPath = getTestProgramPath('simple_main');
     console.log(`Using binary: ${binaryPath}`);
   });
 
@@ -634,7 +641,7 @@ describe('E2E: Save and Persist', { skip: SKIP_REASON, timeout: SUITE_TIMEOUT },
     await client.waitForReady();
     // Set output format to JSON for easier parsing in tests
     await client.callTool('set_output_format', { format: 'json' });
-    binaryPath = getTestBinaryPath('simple_main');
+    binaryPath = getTestProgramPath('simple_main');
   });
 
   after(async () => {

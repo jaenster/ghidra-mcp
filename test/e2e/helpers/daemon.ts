@@ -13,6 +13,13 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, '..', '..', '..');
 const FIXTURES_DIR = path.join(PROJECT_ROOT, 'test-fixtures');
 
+/** Where the built test binaries live — for tests that need a path a session must refuse. */
+export const TEST_BINARIES_DIR = path.join(
+  FIXTURES_DIR,
+  'binaries',
+  `${process.arch === 'arm64' ? 'arm64' : 'x86_64'}-${process.platform === 'darwin' ? 'macos' : 'linux'}-O0`
+);
+
 // Track all daemons we've started for cleanup
 const activeDaemons = new Set<DaemonHandle>();
 
@@ -248,20 +255,23 @@ export async function cleanupAllDaemons(): Promise<void> {
 /**
  * Get path to a test binary
  */
-export function getTestBinaryPath(name: string): string {
-  const arch = process.arch === 'arm64' ? 'arm64' : 'x86_64';
-  const os = process.platform === 'darwin' ? 'macos' : 'linux';
+/**
+ * The .gpr project for a test binary — what a session actually opens.
+ *
+ * Sessions no longer take a loose binary: it would be imported into a project thrown away
+ * with the session. The fixtures are pre-analysed projects instead (npm run fixtures:ghidra).
+ */
+export function getTestProgramPath(name: string): string {
+  const projectPath = getGhidraProjectPath(name);
 
-  const binaryPath = path.join(FIXTURES_DIR, 'binaries', `${arch}-${os}-O0`, name);
-
-  if (!fs.existsSync(binaryPath)) {
+  if (!projectPath) {
     throw new Error(
-      `Test binary not found: ${binaryPath}\n` +
-        `Run 'make native' in test-fixtures/ to build test binaries.`
+      `Test Ghidra project not found for '${name}'.\n` +
+        `Run 'npm run fixtures:build' then 'npm run fixtures:ghidra' (needs GHIDRA_HOME).`
     );
   }
 
-  return binaryPath;
+  return `${projectPath}.gpr`;
 }
 
 /**
@@ -303,9 +313,11 @@ export function getTestBinaries(): TestBinary[] {
     .filter((f) => fs.statSync(path.join(binDir, f)).isFile())
     .map((name) => ({
       name,
-      path: path.join(binDir, name),
+      // `path` is what a test opens: the pre-analysed project, not the raw binary.
+      path: getGhidraProjectPath(name) ? `${getGhidraProjectPath(name)}.gpr` : '',
       ghidraProject: getGhidraProjectPath(name),
-    }));
+    }))
+    .filter((b) => b.path !== '');
 }
 
 /**

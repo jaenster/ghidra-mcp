@@ -53,10 +53,6 @@ public class GhidraEngine {
 
     // ============== ProjectOps (7 methods) ==============
 
-    public void loadProgram(File binaryFile, boolean analyze, int analysisTimeout) throws Exception {
-        projectOps.loadProgram(binaryFile, analyze, analysisTimeout);
-    }
-
     public void openProject(File gprFile) throws Exception {
         projectOps.openProject(gprFile);
     }

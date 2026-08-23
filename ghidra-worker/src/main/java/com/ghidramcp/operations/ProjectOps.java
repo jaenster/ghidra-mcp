@@ -8,9 +8,6 @@ import ghidra.GhidraApplicationLayout;
 import ghidra.GhidraJarApplicationLayout;
 import ghidra.app.decompiler.DecompInterface;
 import ghidra.app.decompiler.DecompileOptions;
-import ghidra.app.util.importer.AutoImporter;
-import ghidra.app.util.importer.MessageLog;
-import ghidra.app.util.opinion.LoadResults;
 import ghidra.base.project.GhidraProject;
 import ghidra.framework.Application;
 import ghidra.framework.ApplicationConfiguration;
@@ -82,46 +79,6 @@ public class ProjectOps {
     }
 
     // ============== Load / Open ==============
-
-    /**
-     * Load a program for analysis (imports a binary into a new project).
-     */
-    public void loadProgram(File binaryFile, boolean analyze, int analysisTimeout) throws Exception {
-        Logger log = ctx.getLog();
-
-        // Create project directory
-        File projectDir = new File(ctx.getProjectPath());
-        if (!projectDir.exists()) {
-            projectDir.mkdirs();
-        }
-
-        // Create or open project
-        String projectName = "analysis";
-        GhidraProject project = GhidraProject.createProject(ctx.getProjectPath(), projectName, false);
-        ctx.setProject(project);
-
-        // Import the binary
-        MessageLog msgLog = new MessageLog();
-        LoadResults<Program> loadResults = AutoImporter.importByUsingBestGuess(
-                binaryFile, project.getProject(), "/", ctx, msgLog, ctx.getMonitor());
-
-        if (loadResults == null || loadResults.getPrimaryDomainObject() == null) {
-            throw new IOException("Failed to import binary: " + msgLog.toString());
-        }
-        Program program = loadResults.getPrimaryDomainObject();
-        ctx.setProgram(program);
-
-        // Initialize flat API
-        ctx.setFlatApi(new FlatProgramAPI(program));
-
-        // Run analysis if requested
-        if (analyze) {
-            runAnalysis();
-        }
-
-        // Initialize decompiler
-        initializeDecompiler();
-    }
 
     /**
      * Open an existing Ghidra project (.gpr file).

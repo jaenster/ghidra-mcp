@@ -316,35 +316,21 @@ export class SessionManager {
     const looksLikeFilesystemPath = expanded.startsWith('/') || expanded.startsWith('./')
       || /^[A-Za-z]:[/\\]/.test(expanded);
 
-    if (!host) {
-      // Nothing shared is configured, so a local binary is the only thing there is to open;
-      // it gets its own local project, which lives as long as this machine does.
-      if (looksLikeFilesystemPath || fs.existsSync(expanded)) {
-        const resolvedPath = path.resolve(expanded);
-        if (!fs.existsSync(resolvedPath)) {
-          throw new Error(
-            `Binary not found: ${resolvedPath}. This was read as a local path because no Ghidra `
-            + 'Server is configured — set GHIDRA_SERVER_HOST (and GHIDRA_SERVER_REPO) to open '
-            + 'programs from a shared repository by their repo path instead.'
-          );
-        }
-        if (fs.statSync(resolvedPath).isDirectory()) {
-          throw new Error(`Not a program: ${resolvedPath} is a directory.`);
-        }
-        return { kind: 'localProject', path: resolvedPath };
-      }
-      throw new Error(
-        `No Ghidra Server configured (GHIDRA_SERVER_HOST is unset), so "${target}" cannot be `
-        + 'resolved to a program. Point the daemon at a server, or pass a local binary or .gpr path.'
-      );
-    }
-
-    // With a shared repository configured, a loose binary is the wrong thing to open: it
-    // would be imported into a project that dies with the session, so the analysis could
-    // never be committed, shared, or reopened. Say so, and point at the import.
+    // A loose binary is never opened. It would be imported into a project created for this
+    // session and thrown away with it, so the analysis could never be committed, shared or
+    // reopened — the one thing the whole point of this is. It goes in the repository first.
     if (looksLikeFilesystemPath && fs.existsSync(expanded)) {
       throw new Error(this.localBinaryError(expanded));
     }
+
+    if (!host) {
+      throw new Error(
+        `No Ghidra Server configured (GHIDRA_SERVER_HOST is unset), so "${target}" cannot be `
+        + 'resolved to a program. Point the daemon at a server with GHIDRA_SERVER_HOST and '
+        + 'GHIDRA_SERVER_REPO, or open a local .gpr project by path.'
+      );
+    }
+
     if (this.workersAreRemote() && looksLikeFilesystemPath) {
       throw new Error(this.remotePathError(expanded));
     }
@@ -376,11 +362,11 @@ export class SessionManager {
     const { repo } = this.serverDefaults();
     const target = repo ?? 'Repo';
     return (
-      `"${localPath}" is a loose binary, and this daemon is backed by a shared Ghidra Server. `
-      + 'Importing it into a throwaway per-session project would give you a program that dies '
-      + 'with the session — nothing to commit to, nothing to reopen. Put it in the repository '
-      + `first: import_program url="…" programPath="/path/in/${target}", then open it with `
-      + 'create_session.'
+      `"${localPath}" is a loose binary, which is not something a session can open. Importing `
+      + 'it into a per-session project would give you a program that dies with the session — '
+      + 'nothing to commit to, nothing to reopen. Put it in the repository first: '
+      + `import_program url="…" programPath="/path/in/${target}", then open that with `
+      + 'create_session. (A local .gpr project is still opened directly.)'
     );
   }
 

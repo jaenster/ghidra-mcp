@@ -12,7 +12,9 @@ import { describe, it, before, after, afterEach } from 'node:test';
 import assert from 'node:assert';
 import {
   startTestDaemon,
-  getTestBinaryPath,
+  getTestProgramPath,
+  hasGhidraProjects,
+  TEST_BINARIES_DIR,
   getTestBinaries,
   cleanupAllDaemons,
   type DaemonHandle,
@@ -26,7 +28,13 @@ const ANALYSIS_TIMEOUT = 180_000; // 3 minutes for analysis-heavy tests (session
 
 // Skip if Ghidra not available
 const GHIDRA_HOME = process.env.GHIDRA_HOME;
-const SKIP_REASON = !GHIDRA_HOME ? 'GHIDRA_HOME not set' : undefined;
+const SKIP_REASON = !GHIDRA_HOME
+  ? 'GHIDRA_HOME not set'
+  // Sessions open a Ghidra project, never a loose binary, so the pre-analysed fixtures
+  // are a hard requirement now rather than an optimisation.
+  : !hasGhidraProjects()
+    ? "No test Ghidra projects — run 'npm run fixtures:build' then 'npm run fixtures:ghidra'"
+    : undefined;
 
 // Ensure cleanup on any exit
 after(async () => {
@@ -86,7 +94,7 @@ describe('E2E: Ghidra MCP Analysis', { skip: SKIP_REASON, timeout: SUITE_TIMEOUT
     let binaryPath: string;
 
     before(() => {
-      binaryPath = getTestBinaryPath('simple_main');
+      binaryPath = getTestProgramPath('simple_main');
       console.log(`Testing binary: ${binaryPath}`);
     });
 
@@ -263,7 +271,7 @@ describe('E2E: Ghidra MCP Analysis', { skip: SKIP_REASON, timeout: SUITE_TIMEOUT
     let binaryPath: string;
 
     before(() => {
-      binaryPath = getTestBinaryPath('call_graph');
+      binaryPath = getTestProgramPath('call_graph');
     });
 
     afterEach(async () => {
@@ -305,7 +313,7 @@ describe('E2E: Ghidra MCP Analysis', { skip: SKIP_REASON, timeout: SUITE_TIMEOUT
     let binaryPath: string;
 
     before(() => {
-      binaryPath = getTestBinaryPath('structures');
+      binaryPath = getTestProgramPath('structures');
     });
 
     afterEach(async () => {
@@ -386,7 +394,16 @@ describe('E2E: Error Handling', { skip: SKIP_REASON, timeout: SUITE_TIMEOUT }, (
   it('should handle non-existent binary gracefully', { timeout: TEST_TIMEOUT }, async () => {
     await assert.rejects(async () => {
       await client.createSession('/nonexistent/path/to/binary');
-    }, /not found|does not exist/i);
+    }, /cannot be resolved|not found|does not exist/i);
+  });
+
+  it('refuses a loose binary and points at the import', { timeout: TEST_TIMEOUT }, async () => {
+    // Opening one would import it into a project thrown away with the session, leaving
+    // nothing to commit or reopen — the error has to say so, and name the way in.
+    const looseBinary = `${TEST_BINARIES_DIR}/simple_main`;
+    await assert.rejects(async () => {
+      await client.createSession(looseBinary);
+    }, /import_program/);
   });
 
   it('should handle invalid session ID gracefully', { timeout: TEST_TIMEOUT }, async () => {

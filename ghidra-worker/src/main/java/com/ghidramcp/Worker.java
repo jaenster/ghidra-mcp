@@ -119,24 +119,24 @@ public class Worker {
                     java.util.Arrays.fill(pw, '\0');
                 }
             } else {
-            // Check if this is a .gpr project file or a binary
+            // Only an existing Ghidra project. A loose binary is imported into the shared
+            // repository (import_program) and opened from there; importing one into a
+            // project created for this session produced a program that died with it.
             File inputFile = new File(binaryPath);
-            if (binaryPath.endsWith(".gpr")) {
-                // Open existing Ghidra project
-                if (readOnly) {
-                    log.info("Opening project read-only: " + binaryPath);
-                    engine.openProjectReadOnly(inputFile, programPath);
-                    log.info("Project opened read-only successfully");
-                } else {
-                    log.info("Opening project: " + binaryPath);
-                    engine.openProject(inputFile, programPath);
-                    log.info("Project opened successfully");
-                }
+            if (!binaryPath.endsWith(".gpr")) {
+                throw new IllegalArgumentException(
+                    "Not a Ghidra project: " + binaryPath + ". A session opens a program from "
+                    + "the Ghidra Server, or a local .gpr project; import a loose binary with "
+                    + "import_program first.");
+            }
+            if (readOnly) {
+                log.info("Opening project read-only: " + binaryPath);
+                engine.openProjectReadOnly(inputFile, programPath);
+                log.info("Project opened read-only successfully");
             } else {
-                // Import binary into new project
-                log.info("Loading binary: " + binaryPath);
-                engine.loadProgram(inputFile, autoAnalyze, analysisTimeout);
-                log.info("Binary loaded successfully");
+                log.info("Opening project: " + binaryPath);
+                engine.openProject(inputFile, programPath);
+                log.info("Project opened successfully");
             }
             }
 
