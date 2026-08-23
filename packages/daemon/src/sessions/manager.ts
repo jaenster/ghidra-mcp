@@ -322,7 +322,14 @@ export class SessionManager {
       if (looksLikeFilesystemPath || fs.existsSync(expanded)) {
         const resolvedPath = path.resolve(expanded);
         if (!fs.existsSync(resolvedPath)) {
-          throw new Error(`Binary not found: ${resolvedPath}`);
+          throw new Error(
+            `Binary not found: ${resolvedPath}. This was read as a local path because no Ghidra `
+            + 'Server is configured — set GHIDRA_SERVER_HOST (and GHIDRA_SERVER_REPO) to open '
+            + 'programs from a shared repository by their repo path instead.'
+          );
+        }
+        if (fs.statSync(resolvedPath).isDirectory()) {
+          throw new Error(`Not a program: ${resolvedPath} is a directory.`);
         }
         return { kind: 'localProject', path: resolvedPath };
       }

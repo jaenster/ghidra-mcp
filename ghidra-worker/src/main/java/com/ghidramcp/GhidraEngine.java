@@ -859,6 +859,9 @@ public class GhidraEngine {
         public boolean isExternal;
         public String namespace;
         public List<JsonObject> tags;  // Structured tags [{type, data?}]
+        // Function-scoped variables only (LOCAL_VAR / PARAMETER)
+        public String storage;
+        public String dataType;
     }
 
     public static class DisassemblyLine {

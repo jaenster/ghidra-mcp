@@ -523,9 +523,10 @@ public class DataTypeOps {
                 + spec.base.getName() + ": " + (bitOffset + spec.bitSize) + " bits used of "
                 + capacity + ". Start a new offset, or widen the base type.");
         }
-        if (replaceExisting) {
-            // insertBitFieldAt inserts rather than overwrites, so make room first by clearing
-            // whatever undefined bytes occupy the storage unit.
+        // insertBitFieldAt inserts rather than overwrites, so make room first by clearing the
+        // undefined bytes occupying the storage unit — but only the first time this offset is
+        // used, or each bitfield would wipe out the ones already placed beside it.
+        if (replaceExisting && !bitCursor.containsKey(field.offset)) {
             clearRange(struct, field.offset, spec.base.getLength());
         }
         struct.insertBitFieldAt(field.offset, spec.base.getLength(), bitOffset, spec.base,

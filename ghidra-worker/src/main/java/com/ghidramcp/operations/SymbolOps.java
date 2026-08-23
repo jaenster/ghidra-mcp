@@ -125,6 +125,49 @@ public class SymbolOps {
         return type.trim().toUpperCase().replace(' ', '_');
     }
 
+    /**
+     * List the locals (or parameters) of every function. These live under their function
+     * rather than in the program-wide symbol iteration, which is why asking for them there
+     * came back empty.
+     */
+    private List<GhidraEngine.SymbolInfo> listFunctionVariables(int offset, int limit,
+            String filterLower, Pattern compiled, boolean parameters) {
+        Program program = ctx.getProgram();
+        List<GhidraEngine.SymbolInfo> symbols = new ArrayList<>();
+        int count = 0;
+        int skipped = 0;
+
+        Iterator<Function> funcIter = program.getFunctionManager().getFunctions(true);
+        while (funcIter.hasNext() && count < limit) {
+            Function func = funcIter.next();
+            ghidra.program.model.listing.Variable[] vars = parameters
+                ? func.getParameters()
+                : func.getLocalVariables();
+            for (ghidra.program.model.listing.Variable var : vars) {
+                if (!GhidraContext.passesFilter(var.getName(), filterLower, compiled)) continue;
+                if (skipped < offset) {
+                    skipped++;
+                    continue;
+                }
+                if (count >= limit) break;
+
+                GhidraEngine.SymbolInfo info = new GhidraEngine.SymbolInfo();
+                info.name = var.getName();
+                info.type = parameters ? "PARAMETER" : "LOCAL_VAR";
+                info.namespace = func.getName(true);
+                // A variable's own address is its storage; the function entry is what a
+                // caller can actually navigate to, so report both.
+                info.address = func.getEntryPoint().toString();
+                info.storage = var.getVariableStorage().toString();
+                info.dataType = var.getDataType().getName();
+                info.isPrimary = true;
+                symbols.add(info);
+                count++;
+            }
+        }
+        return symbols;
+    }
+
     public List<GhidraEngine.SymbolInfo> listSymbols(int offset, int limit, String filter, String regex, String type) {
         Program program = ctx.getProgram();
         List<GhidraEngine.SymbolInfo> symbols = new ArrayList<>();
@@ -140,6 +183,13 @@ public class SymbolOps {
         if (wantedType != null && !KNOWN_SYMBOL_TYPES.contains(wantedType)) {
             throw new IllegalArgumentException("Unknown symbol type \"" + type + "\". Valid: "
                 + String.join(", ", KNOWN_SYMBOL_TYPES));
+        }
+
+        // Function-scoped variables are not reachable from the flat symbol iteration, so a
+        // request for them is served by walking the functions instead.
+        if ("LOCAL_VAR".equals(wantedType) || "PARAMETER".equals(wantedType)) {
+            return listFunctionVariables(offset, limit, filterLower, compiled,
+                                         "PARAMETER".equals(wantedType));
         }
 
         for (Symbol sym : symTable.getAllSymbols(true)) {

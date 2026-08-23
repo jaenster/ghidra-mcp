@@ -298,6 +298,9 @@ export function getTestBinaries(): TestBinary[] {
   return fs
     .readdirSync(binDir)
     .filter((f) => !f.startsWith('.'))
+    // A debug build drops .dSYM bundles next to the binaries; they are directories, not
+    // programs, and picking one up made the multi-session test fail with EISDIR.
+    .filter((f) => fs.statSync(path.join(binDir, f)).isFile())
     .map((name) => ({
       name,
       path: path.join(binDir, name),

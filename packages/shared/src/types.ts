@@ -240,6 +240,9 @@ export interface SymbolInfo {
   isGlobal: boolean;
   source: string;
   tags?: SymbolTag[];
+  /** LOCAL_VAR / PARAMETER only: where the variable lives, and its type. */
+  storage?: string;
+  dataType?: string;
 }
 
 export type SymbolType =
@@ -249,8 +252,9 @@ export type SymbolType =
   | 'NAMESPACE'
   | 'PARAMETER'
   | 'LOCAL_VAR'
-  | 'GLOBAL_VAR'
-  | 'EXTERNAL';
+  | 'GLOBAL_REGISTER_VAR'
+  | 'GLOBAL'
+  | 'LIBRARY';
 
 export interface ImportInfo {
   name: string;
