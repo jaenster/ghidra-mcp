@@ -11,7 +11,7 @@ Worked top to bottom, one commit per item.
 
 **A. Repo-first session model (issue 1 + drop the short-lived local-import path)**
 - [x] A1 `GHIDRA_SERVER_REPO` default repo; bare `program=` paths resolve against it
-- [x] A2 remove loose-binary sessions (throwaway per-session project); `.gpr` and `ghidra://` remain
+- [x] A2 loose-binary sessions refused whenever a server is configured (throwaway project, dies with the session) — kept only for pure-local mode, where there is nothing shared to import into
 - [x] A3 local path gives the real reason, naming the host the worker is connected to
 - [x] A4 `list_repos` / `list_programs` work with no session
 
@@ -33,7 +33,7 @@ Worked top to bottom, one commit per item.
 - [x] E1 `update_structure` bitfield members
 
 **F. Smaller ones (issue 6)**
-- [ ] F1 `list_data_symbols` honours `dataType`
+- [x] F1 `list_data_symbols` honours `dataType` — already correct on main, wired end to end; schema wording clarified
 - [x] F2 `get_data_at_address` reports overlapping labels
 - [x] F3 `get_symbol_after` deduplicates one-address aliases
 - [x] F4 `search type=decompiled` indexes local names / field-extract syntax

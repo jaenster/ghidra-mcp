@@ -313,17 +313,32 @@ export class SessionManager {
       return { kind: 'localProject', path: resolvedPath };
     }
 
+    const looksLikeFilesystemPath = expanded.startsWith('/') || expanded.startsWith('./')
+      || /^[A-Za-z]:[/\\]/.test(expanded);
+
     if (!host) {
+      // Nothing shared is configured, so a local binary is the only thing there is to open;
+      // it gets its own local project, which lives as long as this machine does.
+      if (looksLikeFilesystemPath || fs.existsSync(expanded)) {
+        const resolvedPath = path.resolve(expanded);
+        if (!fs.existsSync(resolvedPath)) {
+          throw new Error(`Binary not found: ${resolvedPath}`);
+        }
+        return { kind: 'localProject', path: resolvedPath };
+      }
       throw new Error(
         `No Ghidra Server configured (GHIDRA_SERVER_HOST is unset), so "${target}" cannot be `
-        + 'resolved to a program. Point the daemon at a server, or pass a local .gpr project path.'
+        + 'resolved to a program. Point the daemon at a server, or pass a local binary or .gpr path.'
       );
     }
 
-    // A path that exists on this machine is a strong hint the caller meant a local file.
-    // Say so explicitly, because "not found" for a file they can see is the worst answer.
-    if (this.workersAreRemote() && (expanded.startsWith('/') || expanded.startsWith('./')
-        || /^[A-Za-z]:[/\\]/.test(expanded)) && fs.existsSync(expanded)) {
+    // With a shared repository configured, a loose binary is the wrong thing to open: it
+    // would be imported into a project that dies with the session, so the analysis could
+    // never be committed, shared, or reopened. Say so, and point at the import.
+    if (looksLikeFilesystemPath && fs.existsSync(expanded)) {
+      throw new Error(this.localBinaryError(expanded));
+    }
+    if (this.workersAreRemote() && looksLikeFilesystemPath) {
       throw new Error(this.remotePathError(expanded));
     }
 
@@ -344,6 +359,21 @@ export class SessionManager {
       + `"${localPath}" is unreachable from it. It is connected to Ghidra Server ${server}. `
       + `Open a program from there instead (${example}, or list_repos / list_programs to see `
       + `what is on it), or put this file on the server with import_program.`
+    );
+  }
+
+  /**
+   * Explain that a loose binary has nowhere durable to live once a repository exists.
+   */
+  private localBinaryError(localPath: string): string {
+    const { repo } = this.serverDefaults();
+    const target = repo ?? 'Repo';
+    return (
+      `"${localPath}" is a loose binary, and this daemon is backed by a shared Ghidra Server. `
+      + 'Importing it into a throwaway per-session project would give you a program that dies '
+      + 'with the session — nothing to commit to, nothing to reopen. Put it in the repository '
+      + `first: import_program url="…" programPath="/path/in/${target}", then open it with `
+      + 'create_session.'
     );
   }
 

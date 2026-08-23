@@ -936,7 +936,7 @@ export const navigationTools: ToolDefinition[] = [
       },
       dataType: {
         type: 'string',
-        description: 'Filter by data type name',
+        description: 'Filter by data type name — case-insensitive substring, so "UnitAny" also matches "UnitAny *". Symbols with no defined data are excluded when this is set.',
       },
     }
   ),
