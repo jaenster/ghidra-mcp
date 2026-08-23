@@ -78,6 +78,11 @@ public class GhidraEngine {
         projectOps.loadServerProgram(programPath);
     }
 
+    /** True when this worker has a project of its own to list programs from. */
+    public boolean hasOpenProject() {
+        return ctx.getProject() != null || ctx.getProjectData() != null;
+    }
+
     /** True when this worker holds an open Ghidra Server project. */
     public boolean isServerMode() {
         return projectOps.isServerMode();

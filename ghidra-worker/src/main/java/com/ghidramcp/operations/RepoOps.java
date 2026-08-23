@@ -83,6 +83,10 @@ public class RepoOps {
     /**
      * Create a repository on the server. The creating user owns it, so subsequent imports
      * and check-ins work without further administration.
+     *
+     * There is deliberately no counterpart: Ghidra Server answers deleteRepository with
+     * "Delete repository not yet implemented", so removing one means deleting its directory
+     * under the server's repositories volume and restarting the server.
      */
     public JsonObject createRepo(String name) throws Exception {
         RepositoryServerAdapter server = requireServer();
@@ -99,36 +103,6 @@ public class RepoOps {
         out.addProperty("repo", name);
         out.addProperty("owner", server.getUser());
         ctx.getLog().info("Created repository '" + name + "'");
-        return out;
-    }
-
-    /**
-     * Delete a repository and everything in it. Refuses a non-empty one unless forced —
-     * this destroys every program and all of their version history.
-     */
-    public JsonObject deleteRepo(String name, boolean force) throws Exception {
-        RepositoryServerAdapter server = requireServer();
-        RepositoryAdapter repo = server.getRepository(name);
-        repo.connect();
-        if (!repo.isConnected()) {
-            throw new IOException("Repository not found: " + name);
-        }
-        int itemCount = repo.getItemCount();
-        if (itemCount > 0 && !force) {
-            throw new IOException("Refusing to delete repository '" + name + "': it holds "
-                + itemCount + " item(s), and deleting it destroys them and their whole version "
-                + "history. Pass force=true to delete it anyway.");
-        }
-        if (name.equals(ctx.getServerRepoName())) {
-            throw new IllegalStateException("This worker has '" + name + "' open; it cannot delete it");
-        }
-        server.deleteRepository(name);
-
-        JsonObject out = new JsonObject();
-        out.addProperty("success", true);
-        out.addProperty("deleted", name);
-        out.addProperty("itemsRemoved", itemCount);
-        ctx.getLog().info("Deleted repository '" + name + "' (" + itemCount + " items)");
         return out;
     }
 
@@ -384,10 +358,19 @@ public class RepoOps {
             if (!df.getName().equals(targetName)) {
                 df = df.setName(targetName);
             }
-            // Put it under version control straight away: an imported program that is only
-            // in the local project is invisible to everyone else and cannot be checked out,
-            // which is the whole reason for importing it into a shared repository.
-            // keepCheckedOut=false releases it, so any session can take its own checkout.
+            String languageId = program.getLanguageID().toString();
+            int functionCount = program.getFunctionManager().getFunctionCount();
+
+            // Close the program BEFORE handing it to version control. A file that is still
+            // open counts as in use, so keepCheckedOut=false could not release the checkout:
+            // the import left it checked out to this worker, which then blocked a session
+            // from opening it and blocked move_program with "is checked out".
+            loadResults.release(this);
+            loadResults = null;
+
+            // An imported program that is only in the local project is invisible to everyone
+            // else and cannot be checked out — the whole reason for importing it into a
+            // shared repository. Released rather than held, so any session can take its own.
             df.addToVersionControl("Imported via ghidra-mcp", false, monitor);
 
             JsonObject out = new JsonObject();
@@ -396,13 +379,15 @@ public class RepoOps {
             out.addProperty("analyzed", analyzed);
             out.addProperty("versioned", df.isVersioned());
             out.addProperty("version", df.getVersion());
-            out.addProperty("languageId", program.getLanguageID().toString());
-            out.addProperty("functions", program.getFunctionManager().getFunctionCount());
+            out.addProperty("checkedOut", df.isCheckedOut());
+            out.addProperty("languageId", languageId);
+            out.addProperty("functions", functionCount);
             String warnings = msgLog.toString();
             if (warnings != null && !warnings.isBlank()) {
                 out.addProperty("log", warnings.trim());
             }
-            log.info("Imported " + df.getPathname() + " (" + program.getLanguageID() + ")");
+            log.info("Imported " + df.getPathname() + " (" + languageId + ", checkedOut="
+                    + df.isCheckedOut() + ")");
             return out;
         } finally {
             if (loadResults != null) {
@@ -485,6 +470,10 @@ public class RepoOps {
     // ============== Delete / move ==============
 
     public JsonObject deleteProgram(String repoName, String programPath) throws Exception {
+        return deleteProgram(repoName, programPath, false);
+    }
+
+    public JsonObject deleteProgram(String repoName, String programPath, boolean force) throws Exception {
         projectOps.openRepoProject(repoName);
         String path = normalizeProgramPath(programPath);
         ProjectData projectData = ctx.getProjectData();
@@ -495,6 +484,9 @@ public class RepoOps {
         if (path.equals(ctx.getActiveProgramPath())) {
             throw new IllegalStateException("Refusing to delete the program this session has open: " + path);
         }
+        if (force) {
+            terminateOtherCheckouts(df);
+        }
         deleteDomainFile(df);
 
         JsonObject out = new JsonObject();
@@ -504,6 +496,11 @@ public class RepoOps {
     }
 
     public JsonObject moveProgram(String repoName, String fromPath, String toPath) throws Exception {
+        return moveProgram(repoName, fromPath, toPath, false);
+    }
+
+    public JsonObject moveProgram(String repoName, String fromPath, String toPath, boolean force)
+            throws Exception {
         projectOps.openRepoProject(repoName);
         String from = normalizeProgramPath(fromPath);
         String to = normalizeProgramPath(toPath);
@@ -519,6 +516,10 @@ public class RepoOps {
         }
         if (from.equals(ctx.getActiveProgramPath())) {
             throw new IllegalStateException("Refusing to move the program this session has open: " + from);
+        }
+
+        if (force) {
+            terminateOtherCheckouts(df);
         }
 
         int slash = to.lastIndexOf('/');
@@ -553,6 +554,25 @@ public class RepoOps {
     }
 
     // ============== Helpers ==============
+
+    /**
+     * Break checkouts held by other projects, so a program abandoned by a dead worker can be
+     * moved or deleted. Destructive by nature — whatever was checked out and never committed
+     * is lost — so it only ever happens on an explicit force.
+     */
+    private void terminateOtherCheckouts(DomainFile df) throws IOException {
+        if (!df.isVersioned()) {
+            return;
+        }
+        for (ghidra.framework.store.ItemCheckoutStatus checkout : df.getCheckouts()) {
+            ctx.getLog().warn("Terminating checkout " + checkout.getCheckoutId() + " of "
+                    + df.getPathname() + " held by " + checkout.getUser() + " (force)");
+            df.terminateCheckout(checkout.getCheckoutId());
+        }
+        if (df.isCheckedOut()) {
+            df.undoCheckout(false);
+        }
+    }
 
     private void deleteDomainFile(DomainFile df) throws IOException {
         if (df.isCheckedOut()) {

@@ -50,9 +50,6 @@ public class CommandHandler {
             case "create_repo":
                 return handleCreateRepo(params);
 
-            case "delete_repo":
-                return handleDeleteRepo(params);
-
             case "import_program":
                 return handleImportProgram(params);
 
@@ -378,14 +375,6 @@ public class CommandHandler {
         return engine.repo().createRepo(name);
     }
 
-    private JsonObject handleDeleteRepo(JsonObject params) throws Exception {
-        String name = getString(params, "name", null);
-        if (name == null || name.isEmpty()) {
-            throw new IllegalArgumentException("name is required");
-        }
-        return engine.repo().deleteRepo(name, getBoolean(params, "force", false));
-    }
-
     private JsonObject handleImportProgram(JsonObject params) throws Exception {
         String repo = getString(params, "repo", null);
         List<com.ghidramcp.operations.RepoOps.ImportSpec> specs = new ArrayList<>();
@@ -448,7 +437,7 @@ public class CommandHandler {
             throw new IllegalArgumentException("programPath is required");
         }
         String[] split = splitRepoPath(programPath, getString(params, "repo", null));
-        return engine.repo().deleteProgram(split[0], split[1]);
+        return engine.repo().deleteProgram(split[0], split[1], getBoolean(params, "force", false));
     }
 
     private JsonObject handleMoveProgram(JsonObject params) throws Exception {
@@ -464,7 +453,8 @@ public class CommandHandler {
             throw new IllegalArgumentException("A move stays within one repository: "
                 + fromSplit[0] + " -> " + toSplit[0]);
         }
-        return engine.repo().moveProgram(fromSplit[0], fromSplit[1], toSplit[1]);
+        return engine.repo().moveProgram(fromSplit[0], fromSplit[1], toSplit[1],
+                                         getBoolean(params, "force", false));
     }
 
     /**
@@ -2040,10 +2030,11 @@ public class CommandHandler {
     // ==================== MULTI-PROGRAM ====================
 
     private JsonObject handleListPrograms(JsonObject params) throws Exception {
-        // With a repo, list straight off the server so no project (and no session with a
-        // program already open) is needed — that is what makes the repo discoverable.
+        // List straight off the server whenever this worker has no project of its own to
+        // list — that is what makes the server discoverable before anything is open. With
+        // no repo named, every repository is listed.
         String repo = getString(params, "repo", null);
-        if (repo != null) {
+        if (repo != null || !engine.hasOpenProject()) {
             return engine.repo().listRepoPrograms(repo,
                     getString(params, "folder", null),
                     getBoolean(params, "recursive", true),

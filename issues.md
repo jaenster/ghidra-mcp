@@ -49,9 +49,16 @@ Worked top to bottom, one commit per item.
 G1, and the local-path errors. The full e2e suite passes (55/55; the 3 auth-suite failures
 predate this work and reproduce on a clean tree).
 
-**Not verifiable here** — no Ghidra Server on this machine: repo mode (A4), `import_program`,
-`delete_program`, `move_program`. These compile and are wired end to end, but want a run
-against the real server.
+**Verified against the live Ghidra Server** (ghidra.typeguru.nl): `list_repos`,
+`list_programs` (all repos and per repo), `create_repo`, `import_program` by URL with analysis
+— it lands as version 1, released not checked out — `create_session` on a repo path *and* on a
+freshly imported program, `list_functions`, `close_session`, `delete_program` (with `force`
+for a checkout left by a dead worker). No residue left behind.
+
+**Known not working:** `move_program` fails with "is checked out" against a program a session
+has opened, because Ghidra registers the checkout server-side and the local project keeps a
+hold on it. `delete_program force` is the workaround; the move path needs more work.
+`delete_repo` was removed — Ghidra Server does not implement deleting a repository at all.
 
 The e2e fixtures are now pre-analysed `.gpr` projects (`npm run fixtures:ghidra`), since a
 session can no longer open a loose binary. They run serially: the suites share those

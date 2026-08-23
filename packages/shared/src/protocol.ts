@@ -142,7 +142,6 @@ export type WorkerCommand =
   // Repository commands
   | ListReposCommand
   | CreateRepoCommand
-  | DeleteRepoCommand
   | ImportProgramCommand
   | ImportStatusCommand
   | DeleteProgramCommand
@@ -1040,14 +1039,6 @@ export interface CreateRepoCommand extends BaseCommand {
   };
 }
 
-export interface DeleteRepoCommand extends BaseCommand {
-  command: 'delete_repo';
-  params: {
-    name: string;
-    force?: boolean;
-  };
-}
-
 export interface ImportProgramCommand extends BaseCommand {
   command: 'import_program';
   params: {
@@ -1080,6 +1071,8 @@ export interface DeleteProgramCommand extends BaseCommand {
     /** Optional override; normally the repository is the first segment of programPath. */
     repo?: string;
     programPath: string;
+    /** Break checkouts held by other projects (loses anything uncommitted in them). */
+    force?: boolean;
   };
 }
 
@@ -1089,6 +1082,8 @@ export interface MoveProgramCommand extends BaseCommand {
     repo?: string;
     from: string;
     to: string;
+    /** Break checkouts held by other projects (loses anything uncommitted in them). */
+    force?: boolean;
   };
 }
 

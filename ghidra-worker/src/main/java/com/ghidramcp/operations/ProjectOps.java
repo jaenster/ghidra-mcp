@@ -403,6 +403,38 @@ public class ProjectOps {
     }
 
     /**
+     * Give back the checkouts this worker took but never wrote to.
+     *
+     * Opening a server program checks it out. Nothing ever gave that back, so every session
+     * left a checkout behind on the server for a working copy that no longer exists — they
+     * accumulate, and they block move_program and delete_program on that program.
+     *
+     * A checkout with local modifications is KEPT: undoing it would throw away work that was
+     * never committed. Only untouched ones are released.
+     */
+    private void releaseUntouchedCheckouts() {
+        Logger log = ctx.getLog();
+        for (java.util.Map.Entry<String, DomainFile> entry : ctx.getServerFiles().entrySet()) {
+            DomainFile df = entry.getValue();
+            try {
+                if (!df.isCheckedOut()) {
+                    continue;
+                }
+                if (df.modifiedSinceCheckout()) {
+                    log.info("Keeping checkout of " + entry.getKey()
+                            + ": it has uncommitted changes (commit to publish them)");
+                    continue;
+                }
+                df.undoCheckout(false);
+                log.info("Released untouched checkout of " + entry.getKey());
+            } catch (Exception e) {
+                log.warn("Could not release checkout of " + entry.getKey() + ": " + e.getMessage());
+            }
+        }
+        ctx.getServerFiles().clear();
+    }
+
+    /**
      * Check in (commit) the checked-out server program as a new server version.
      * Saves the working copy first, then performs a Ghidra check-in keeping the checkout
      * so editing can continue.  For a file that is in the project but not yet under version
@@ -589,6 +621,8 @@ public class ProjectOps {
         ctx.setProgram(null);
         ctx.setDecompiler(null);
         ctx.setFlatApi(null);
+
+        releaseUntouchedCheckouts();
 
         if (project != null) {
             try {

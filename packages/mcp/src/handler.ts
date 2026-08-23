@@ -460,7 +460,7 @@ export class GhidraToolHandler {
     // before any session exists — that is the whole point of being able to discover what
     // is on the server. Fall back to the daemon's repo worker.
     const REPO_TOOLS = new Set([
-      'list_repos', 'create_repo', 'delete_repo',
+      'list_repos', 'create_repo',
       'import_program', 'import_status', 'delete_program', 'move_program',
     ]);
     // list_programs with no repo lists every repository, which is the useful default for
@@ -623,22 +623,14 @@ export class GhidraToolHandler {
           timeout,
         };
 
+      case 'list_repos':
+        return { id, command: 'list_repos', params: {}, timeout };
+
       case 'create_repo':
         return {
           id,
           command: 'create_repo',
           params: { name: params.name as string },
-          timeout,
-        };
-
-      case 'delete_repo':
-        return {
-          id,
-          command: 'delete_repo',
-          params: {
-            name: params.name as string,
-            force: params.force as boolean | undefined,
-          },
           timeout,
         };
 
@@ -678,6 +670,7 @@ export class GhidraToolHandler {
           params: {
             repo: params.repo as string | undefined,
             programPath: params.programPath as string,
+            force: params.force as boolean | undefined,
           },
           timeout,
         };
@@ -690,6 +683,7 @@ export class GhidraToolHandler {
             repo: params.repo as string | undefined,
             from: params.from as string,
             to: params.to as string,
+            force: params.force as boolean | undefined,
           },
           timeout,
         };

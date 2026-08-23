@@ -122,9 +122,12 @@ which server it *is* connected to — rather than "Binary not found".
 
 ### Getting binaries in
 
-`create_repo` makes a repository; `delete_repo` removes one (refusing a non-empty one unless
-forced). `import_program` puts a binary into a repository — the **worker** fetches the bytes,
-so give it a URL it can reach (or `localPath` on the worker host, or inline `bytesBase64`):
+`create_repo` makes a repository. There is no delete counterpart: Ghidra Server answers
+`deleteRepository` with *"Delete repository not yet implemented"*, so removing one means
+deleting its directory under the server's repositories volume and restarting the server.
+
+`import_program` puts a binary into a repository — the **worker** fetches the bytes, so give
+it a URL it can reach (or `localPath` on the worker host, or inline `bytesBase64`):
 
 ```
 import_program url="https://files.example.com/1.09d/D2Game.dll" \
@@ -135,8 +138,11 @@ An import is **added to version control automatically** — it lands as version 
 rather than held checked out, so any session can immediately take its own checkout and
 `commit` back to it. Analysis is far too slow to hold a request open, so the import runs as
 a background job and returns a `jobId` that `import_status` polls (pass `wait=true` for
-small ones). `items` imports many in a single job. `delete_program` and `move_program` fix
-an import that landed in the wrong place.
+small ones). `items` imports many in a single job. `delete_program` removes a program;
+both it and `move_program` take `force` to break a checkout left behind by a dead worker.
+
+Opening a program checks it out; closing the session gives that checkout back unless the
+working copy has uncommitted changes, in which case it is kept so the work is not lost.
 
 Opening a **loose local binary is refused**: it would be imported into a project created for
 the session and destroyed with it, so the analysis could never be committed, shared or

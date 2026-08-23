@@ -401,30 +401,13 @@ export const multiProgramTools: ToolDefinition[] = [
   defineTool(
     'create_repo',
     'Create a repository on the Ghidra Server. The connecting user owns it, so imports and ' +
-    'check-ins into it work straight away.',
+    'check-ins into it work straight away. There is no delete counterpart — Ghidra Server does ' +
+    'not implement deleting a repository; that is done on the server host.',
     {
       ...sessionIdProp,
       name: {
         type: 'string',
         description: 'Repository name',
-      },
-    },
-    ['name']
-  ),
-
-  defineTool(
-    'delete_repo',
-    'Delete a repository from the Ghidra Server. Refuses a repository that still holds programs ' +
-    'unless force is set — deleting it destroys every program in it and their whole version history.',
-    {
-      ...sessionIdProp,
-      name: {
-        type: 'string',
-        description: 'Repository name',
-      },
-      force: {
-        type: 'boolean',
-        description: 'Delete even when the repository still holds programs, destroying them (default: false)',
       },
     },
     ['name']
@@ -554,6 +537,10 @@ export const multiProgramTools: ToolDefinition[] = [
         type: 'string',
         description: 'Program to delete, repository first: "Diablo2Lod/windows/1.09d/Game.exe"',
       },
+      force: {
+        type: 'boolean',
+        description: 'Break a checkout left behind by a dead worker, losing anything uncommitted in it (default: false)',
+      },
     },
     ['programPath']
   ),
@@ -575,6 +562,10 @@ export const multiProgramTools: ToolDefinition[] = [
       to: {
         type: 'string',
         description: 'New path, same repository (folders are created as needed)',
+      },
+      force: {
+        type: 'boolean',
+        description: 'Break a checkout left behind by a dead worker, losing anything uncommitted in it (default: false)',
       },
     },
     ['from', 'to']
