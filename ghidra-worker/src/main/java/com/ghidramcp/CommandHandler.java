@@ -446,9 +446,12 @@ public class CommandHandler {
         if (from == null || to == null) {
             throw new IllegalArgumentException("from and to are required");
         }
+        // Both paths are read the same way: repository-first, or repo-relative when an
+        // explicit repo is given. Passing `from`'s repo as the override for `to` made a
+        // repo-first destination be taken as a path, producing Repo/Repo/....
         String repo = getString(params, "repo", null);
         String[] fromSplit = splitRepoPath(from, repo);
-        String[] toSplit = splitRepoPath(to, repo != null ? repo : fromSplit[0]);
+        String[] toSplit = splitRepoPath(to, repo);
         if (!fromSplit[0].equals(toSplit[0])) {
             throw new IllegalArgumentException("A move stays within one repository: "
                 + fromSplit[0] + " -> " + toSplit[0]);

@@ -4,7 +4,8 @@
 
 import * as http from 'node:http';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
-import { getWorkerSecret } from '@ghidra-mcp/shared/platform';
+import * as fs from 'node:fs';
+import { getWorkerSecret, getUploadsDir, getDaemonPort } from '@ghidra-mcp/shared/platform';
 import express, { type Express, type Request, type Response } from 'express';
 import { WebSocketServer, WebSocket } from 'ws';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
@@ -18,6 +19,7 @@ import type { StateDatabase } from './state/database.js';
 import type { LogStore } from './logging/store.js';
 import type { Logger } from './logging/logger.js';
 import type { ToolHandlerContext } from '@ghidra-mcp/mcp';
+import { UploadStore } from './uploads/store.js';
 import type { WorkerCommand, WorkerResponse, WorkerReconnectRequest } from '@ghidra-mcp/shared/protocol';
 import type { LogEntry, LogQueryOptions } from '@ghidra-mcp/shared';
 import type { CommandLog } from './command-log.js';
@@ -49,6 +51,10 @@ export async function createServer(options: ServerOptions): Promise<{
   const app = express();
   // Increase body size limit for large responses (data types from big binaries like Diablo 2)
   app.use(express.json({ limit: '100mb' }));
+
+  // Upload slots: a client asks for one over MCP, PUTs a binary to the URL it gets back,
+  // then names that upload in import_program. The worker fetches it from the daemon.
+  const uploads = new UploadStore({ dir: getUploadsDir() });
 
   // OAuth 2.1 authorization server (active only when GHIDRA_MCP_PUBLIC_URL +
   // GHIDRA_MCP_AUTH_SECRET are set). Gates the MCP transports below; health,
@@ -332,6 +338,56 @@ export async function createServer(options: ServerOptions): Promise<{
     }
     res.status(403).json({ error: 'Forbidden' });
   };
+  // Receive an upload. The unguessable, single-use, expiring id IS the authorisation —
+  // the slot was handed out by an authenticated MCP call, and nothing here reads or lists
+  // anything: it only fills a slot that already exists.
+  // type: () => true takes the body whatever the Content-Type says — including when the
+  // client sends none at all, which is what a plain `curl --upload-file` does.
+  const rawBody = express.raw({ type: () => true, limit: uploads.maxBytes });
+  app.put('/upload/:id', rawBody, (req: Request, res: Response) => handleUpload(req, res));
+  app.post('/upload/:id', rawBody, (req: Request, res: Response) => handleUpload(req, res));
+
+  function handleUpload(req: Request, res: Response): void {
+    const slot = uploads.get(req.params.id);
+    if (!slot) {
+      res.status(404).json({ error: 'No such upload, or it has expired' });
+      return;
+    }
+    if (slot.receivedAt) {
+      res.status(409).json({ error: 'That upload has already been filled' });
+      return;
+    }
+    const body = req.body as Buffer | undefined;
+    if (!Buffer.isBuffer(body) || body.length === 0) {
+      res.status(400).json({ error: 'Send the binary as the raw request body' });
+      return;
+    }
+    try {
+      fs.writeFileSync(slot.filePath, body);
+    } catch (err) {
+      res.status(500).json({ error: `Could not store the upload: ${(err as Error).message}` });
+      return;
+    }
+    uploads.markReceived(slot.id, body.length);
+    options.logger?.info('Upload received', { id: slot.id, bytes: body.length });
+    res.json({
+      uploadId: slot.id,
+      filename: slot.filename,
+      bytes: body.length,
+      programPathHint: slot.filename,
+    });
+  }
+
+  // Fetched by the WORKER when importing an upload; the id is the capability.
+  app.get('/upload/:id/raw', (req: Request, res: Response) => {
+    const slot = uploads.get(req.params.id);
+    if (!slot || !slot.receivedAt) {
+      res.status(404).json({ error: 'No such upload, or nothing has been uploaded to it yet' });
+      return;
+    }
+    res.sendFile(slot.filePath);
+  });
+
   app.use('/internal', requireWorkerSecret);
 
   // Internal endpoint for worker back-connect
@@ -449,6 +505,26 @@ export async function createServer(options: ServerOptions): Promise<{
       createSession: (path, opts) => sessionManager.createSession(path, opts),
       closeSession: (id, force) => sessionManager.closeSession(id, force),
       getRepoSession: () => sessionManager.getRepoSession(),
+      createUpload: (filename) => {
+        const slot = uploads.create(filename);
+        // The URL the CLIENT uses: its public address when there is one, otherwise the
+        // address it already reached this daemon on.
+        const base = (process.env.GHIDRA_MCP_PUBLIC_URL?.trim().replace(/\/+$/, ''))
+          || `http://127.0.0.1:${getDaemonPort()}`;
+        return {
+          uploadId: slot.id,
+          uploadUrl: `${base}/upload/${slot.id}`,
+          expiresAt: slot.expiresAt,
+          maxBytes: uploads.maxBytes,
+        };
+      },
+      consumeUpload: (uploadId) => uploads.markSpent(uploadId),
+      getUploadFetchUrl: (uploadId) => {
+        const slot = uploads.get(uploadId);
+        if (!slot || !slot.receivedAt || slot.spentAt) return null;
+        // The WORKER's route to this daemon, which is not the client's.
+        return `${workerPool.daemonUrlForWorkers()}/upload/${slot.id}/raw`;
+      },
       sendCommand: async (sessionId: string, command: WorkerCommand) => {
         commandLog?.recordStart(command.id, sessionId, command.command, command.params ?? {});
         try {

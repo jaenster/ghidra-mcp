@@ -258,6 +258,16 @@ export function getProjectPath(sessionId: string): string {
   return path.join(getProjectsDir(), sessionId);
 }
 
+/** Where uploaded binaries wait to be imported. On the daemon's data volume. */
+export function getUploadsDir(): string {
+  const paths = getAppPaths();
+  const uploadsDir = path.join(paths.dataDir, 'uploads');
+  if (!fs.existsSync(uploadsDir)) {
+    fs.mkdirSync(uploadsDir, { recursive: true });
+  }
+  return uploadsDir;
+}
+
 // =============================================================================
 // Ghidra Worker JAR
 // =============================================================================

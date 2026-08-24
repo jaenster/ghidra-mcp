@@ -90,9 +90,10 @@ concurrency scale with cluster capacity instead of a single pod's RAM.
 Cloud-native mode is built around a **collaborative [Ghidra Server](https://ghidra-sre.org/InstallationGuide.html#GhidraServer)**
 (the RMI repository server, ports 13100-13102) as the source of truth for programs:
 
-- Clients open a program by **repository path**; the daemon supplies the server identity
-  from `GHIDRA_SERVER_HOST:PORT`. Credentials always come from the environment, never the
-  URL.
+- A daemon speaks for **exactly one** server, the one in `GHIDRA_SERVER_HOST:PORT`. Clients
+  open a program by repository path and never name a host; a `ghidra://` URL pointing at a
+  different host is refused rather than half-honoured. Credentials always come from the
+  environment, never the URL.
 - Multiple workers (and human Ghidra GUI users) share the same repository, so analysis —
   renames, structs, comments, bookmarks — is committed back and persists across sessions.
 - The worker image's bundled Ghidra version **must match** the Ghidra Server version —
@@ -134,12 +135,28 @@ import_program url="https://files.example.com/1.09d/D2Game.dll" \
                programPath="Diablo2Lod/windows/1.09d/D2Game.dll"
 ```
 
+For a binary that only exists on the client's machine, ask for an upload slot and PUT it:
+
+```
+request_upload filename="Game.exe"
+  -> { uploadId, uploadUrl, expiresAt }
+curl --upload-file Game.exe "<uploadUrl>"
+import_program uploadId="<uploadId>" programPath="Diablo2Lod/windows/1.09d/Game.exe"
+```
+
+The slot is single-use and expires (`GHIDRA_MCP_UPLOAD_TTL_MS`, default 1h;
+`GHIDRA_MCP_UPLOAD_MAX_BYTES`, default 2GiB). Its unguessable id is the authorisation, so the
+upload route itself needs no session — the slot is only ever handed out by an authenticated
+MCP call. The daemon then gives the worker its own address for the file, which is not the one
+the client used.
+
 An import is **added to version control automatically** — it lands as version 1, released
 rather than held checked out, so any session can immediately take its own checkout and
 `commit` back to it. Analysis is far too slow to hold a request open, so the import runs as
 a background job and returns a `jobId` that `import_status` polls (pass `wait=true` for
-small ones). `items` imports many in a single job. `delete_program` removes a program;
-both it and `move_program` take `force` to break a checkout left behind by a dead worker.
+small ones). `items` imports many in a single job. `delete_program` removes a program and
+`move_program` moves or renames one; both take `force` to break a checkout left behind by a
+dead worker.
 
 Opening a program checks it out; closing the session gives that checkout back unless the
 working copy has uncommitted changes, in which case it is kept so the work is not lost.
@@ -210,6 +227,8 @@ provider with the `GHIDRA_MCP_OIDC_*` vars (only allow-listed users get tokens).
 | `GHIDRA_SERVER_HOST` / `GHIDRA_SERVER_PORT` | Default Ghidra Server the daemon connects to | — / `13100` |
 | `GHIDRA_SERVER_USER` / `GHIDRA_SERVER_PASSWORD` | Worker's Ghidra Server credentials | — |
 | `GHIDRA_MCP_REPO_SESSION_IDLE_MS` | Idle time before the repo-browsing worker is reaped | `600000` |
+| `GHIDRA_MCP_UPLOAD_TTL_MS` | How long an upload slot lives | `3600000` |
+| `GHIDRA_MCP_UPLOAD_MAX_BYTES` | Largest accepted upload | `2147483648` |
 | `GHIDRA_MCP_WORKER_BACKEND` | `process` (local child) or `k8s` (one pod per worker) | `process` |
 | `GHIDRA_MCP_WORKER_DAEMON_URL` | In-cluster Service URL workers call back to (k8s) | — |
 | `GHIDRA_MCP_WORKER_IMAGE` | Worker pod image (k8s) | inherits daemon's own image |

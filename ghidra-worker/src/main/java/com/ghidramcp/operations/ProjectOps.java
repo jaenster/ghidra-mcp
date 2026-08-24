@@ -394,6 +394,32 @@ public class ProjectOps {
                  df.isCheckedOut() + ")");
     }
 
+    /**
+     * Close the repository project, keeping the server connection.
+     *
+     * Ghidra checkouts belong to a PROJECT, and this worker's project is long-lived and
+     * reused: a file it imported stayed held by it, so moving or deleting that program
+     * afterwards was refused as "checked out" by a project nobody was using. Letting go
+     * after each job keeps holds as short as the work that needs them; the next job reopens.
+     */
+    public void closeRepoProject() {
+        Logger log = ctx.getLog();
+        Project serverProject = ctx.getServerProject();
+        if (serverProject == null) {
+            return;
+        }
+        try {
+            if (!serverProject.isClosed()) {
+                serverProject.close();
+            }
+        } catch (Exception e) {
+            log.warn("Error closing repository project: " + e.getMessage());
+        }
+        ctx.setServerProject(null);
+        ctx.setProjectData(null);
+        ctx.setServerRepoName(null);
+    }
+
     private ghidra.framework.client.RepositoryServerAdapter requireServer() throws IOException {
         ghidra.framework.client.RepositoryServerAdapter server = ctx.getServerAdapter();
         if (server == null || !server.isConnected()) {

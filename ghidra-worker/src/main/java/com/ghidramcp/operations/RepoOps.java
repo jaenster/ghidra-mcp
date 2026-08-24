@@ -57,6 +57,11 @@ public class RepoOps {
     private final GhidraContext ctx;
     private final ProjectOps projectOps;
 
+    // Everything that needs the repository project open takes this: an import job and a
+    // move/delete arriving together would otherwise fight over the project lock, since each
+    // job lets go of the project when it finishes.
+    private final Object projectLock = new Object();
+
     private final Map<String, Job> jobs = new ConcurrentHashMap<>();
     private final ExecutorService jobExecutor = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "repo-import");
@@ -265,6 +270,13 @@ public class RepoOps {
 
     private void runImport(Job job, String repoName, List<ImportSpec> specs, boolean analyze,
                            boolean overwrite) {
+        synchronized (projectLock) {
+            runImportLocked(job, repoName, specs, analyze, overwrite);
+        }
+    }
+
+    private void runImportLocked(Job job, String repoName, List<ImportSpec> specs, boolean analyze,
+                                 boolean overwrite) {
         Logger log = ctx.getLog();
         job.state = "running";
         try {
@@ -291,6 +303,10 @@ public class RepoOps {
             job.state = "error";
             job.error = String.valueOf(e.getMessage());
         } finally {
+            // Let go of the project as soon as the job is done. Holding it keeps a checkout
+            // on everything imported through it, which then blocks move_program and
+            // delete_program on programs no one is actually using.
+            projectOps.closeRepoProject();
             job.current = null;
             job.finished = true;
         }
@@ -380,6 +396,11 @@ public class RepoOps {
             out.addProperty("versioned", df.isVersioned());
             out.addProperty("version", df.getVersion());
             out.addProperty("checkedOut", df.isCheckedOut());
+            try {
+                out.addProperty("outstandingCheckouts", df.getCheckouts().length);
+            } catch (Exception ignored) {
+                // informational only
+            }
             out.addProperty("languageId", languageId);
             out.addProperty("functions", functionCount);
             String warnings = msgLog.toString();
@@ -443,7 +464,10 @@ public class RepoOps {
         }
 
         URI uri = URI.create(spec.url.replace(" ", "%20"));
+        // Pin HTTP/1.1: the default tries an HTTP/2 upgrade, which the daemon's own upload
+        // endpoint answers by closing the connection ("header parser received no bytes").
         HttpClient client = HttpClient.newBuilder()
+                .version(HttpClient.Version.HTTP_1_1)
                 .followRedirects(HttpClient.Redirect.NORMAL)
                 .build();
         HttpRequest request = HttpRequest.newBuilder(uri).GET().build();
@@ -474,6 +498,13 @@ public class RepoOps {
     }
 
     public JsonObject deleteProgram(String repoName, String programPath, boolean force) throws Exception {
+        synchronized (projectLock) {
+            return deleteProgramLocked(repoName, programPath, force);
+        }
+    }
+
+    private JsonObject deleteProgramLocked(String repoName, String programPath, boolean force)
+            throws Exception {
         projectOps.openRepoProject(repoName);
         String path = normalizeProgramPath(programPath);
         ProjectData projectData = ctx.getProjectData();
@@ -492,6 +523,7 @@ public class RepoOps {
         JsonObject out = new JsonObject();
         out.addProperty("success", true);
         out.addProperty("deleted", repoQualified(path));
+        projectOps.closeRepoProject();
         return out;
     }
 
@@ -501,6 +533,13 @@ public class RepoOps {
 
     public JsonObject moveProgram(String repoName, String fromPath, String toPath, boolean force)
             throws Exception {
+        synchronized (projectLock) {
+            return moveProgramLocked(repoName, fromPath, toPath, force);
+        }
+    }
+
+    private JsonObject moveProgramLocked(String repoName, String fromPath, String toPath,
+                                         boolean force) throws Exception {
         projectOps.openRepoProject(repoName);
         String from = normalizeProgramPath(fromPath);
         String to = normalizeProgramPath(toPath);
@@ -526,30 +565,29 @@ public class RepoOps {
         String targetFolder = slash <= 0 ? "/" : to.substring(0, slash);
         String targetName = to.substring(slash + 1);
 
-        // A versioned file must be checked out to be renamed, but NOT to be moved; do the
-        // move first so a rename-only request never needs a checkout it cannot get.
+        // Neither moving nor renaming a versioned file wants a checkout — Ghidra refuses
+        // both while one is outstanding. (Taking one first, as this used to, is precisely
+        // what made every rename fail with "<name> is checked out".) If something else holds
+        // one, say so and point at the way out.
+        if (df.isCheckedOut()) {
+            throw new IOException(from + " is checked out, so it cannot be moved. Close the "
+                + "session using it, or pass force=true to break the checkout (losing anything "
+                + "uncommitted in it).");
+        }
+
         DomainFolder folder = ensureFolder(projectData, targetFolder);
         if (!df.getParent().getPathname().equals(folder.getPathname())) {
             df = df.moveTo(folder);
         }
         if (!df.getName().equals(targetName)) {
-            boolean checkedOutHere = false;
-            if (df.isVersioned() && !df.isCheckedOut()) {
-                if (!df.checkout(false, monitor)) {
-                    throw new IOException("Rename needs a checkout, which was refused: " + from);
-                }
-                checkedOutHere = true;
-            }
             df = df.setName(targetName);
-            if (checkedOutHere) {
-                df.undoCheckout(false);
-            }
         }
 
         JsonObject out = new JsonObject();
         out.addProperty("success", true);
         out.addProperty("from", repoQualified(from));
         out.addProperty("to", repoQualified(df.getPathname()));
+        projectOps.closeRepoProject();
         return out;
     }
 

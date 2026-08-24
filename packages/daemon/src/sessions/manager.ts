@@ -284,15 +284,26 @@ export class SessionManager {
       const firstSeg = afterScheme.split('/')[0];
       // A real host segment carries a port (':'), a dotted FQDN/IP ('.'), credentials
       // ('@'), or is 'localhost'. Otherwise the first segment is a REPO name and the
-      // URL is host-less → resolve against the configured default server.
+      // URL is host-less → it names a program on the one server this daemon serves.
       const hostQualified = firstSeg.includes(':') || firstSeg.includes('.')
         || firstSeg.includes('@') || firstSeg === 'localhost';
-      if (hostQualified) {
-        return { kind: 'server', url: target };
-      }
       if (!host) {
-        throw new Error('Host-less ghidra:// path but no GHIDRA_SERVER_HOST configured — '
-          + 'set GHIDRA_SERVER_HOST or pass a full ghidra://host:port/repo/... URL.');
+        throw new Error('No Ghidra Server configured (GHIDRA_SERVER_HOST is unset), so there is '
+          + 'nothing to open a program from.');
+      }
+      if (hostQualified) {
+        // This daemon speaks for exactly ONE server: its credentials, its network position
+        // and its worker pods all belong to that server. A URL naming a different host is
+        // refused rather than half-honoured — pointing somewhere else needs its own daemon.
+        const parsed = parseGhidraServerUrl(target);
+        if (parsed.host !== host || parsed.port !== port) {
+          throw new Error(
+            `This daemon only connects to ${host}:${port}, but that URL names `
+            + `${parsed.host}:${parsed.port}. Drop the host and name the program by its `
+            + `repository path instead ("${parsed.repo}${parsed.programPath}").`
+          );
+        }
+        return { kind: 'server', url: `ghidra://${host}:${port}/${parsed.repo}${parsed.programPath}` };
       }
       return { kind: 'server', url: `ghidra://${host}:${port}/${afterScheme}` };
     }

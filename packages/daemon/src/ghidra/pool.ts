@@ -11,6 +11,8 @@ import {
   getWorkerJarPath,
   getMemoryLimit,
   getDaemonPort,
+  getDaemonUrl,
+  getWorkerDaemonUrl,
 } from '@ghidra-mcp/shared/platform';
 import { selectLauncher, type WorkerLauncher, type WorkerHandle } from './launcher/launcher.js';
 import type {
@@ -347,6 +349,15 @@ export class WorkerPool {
 
     this.workers.set(workerId, state);
     return workerId;
+  }
+
+  /**
+   * Where WORKERS reach this daemon — the in-cluster Service for a pod, loopback for a
+   * local child process. Not the same address a client uses, which is why a URL handed to
+   * a worker cannot simply be the one the client was given.
+   */
+  daemonUrlForWorkers(): string {
+    return getWorkerDaemonUrl() ?? getDaemonUrl(getDaemonPort());
   }
 
   /**

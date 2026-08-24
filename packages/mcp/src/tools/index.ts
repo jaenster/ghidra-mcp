@@ -399,6 +399,21 @@ export const multiProgramTools: ToolDefinition[] = [
   ),
 
   defineTool(
+    'request_upload',
+    'Reserve a slot for uploading a binary, for when it is only on the client\'s machine. ' +
+    'Returns a one-time URL: PUT the file to it as the raw request body, then pass the ' +
+    'uploadId to import_program. The slot expires, and can only be filled once. ' +
+    'Prefer a plain url on import_program when the worker can already reach the file.',
+    {
+      ...sessionIdProp,
+      filename: {
+        type: 'string',
+        description: 'Original file name, used to name the stored file (optional)',
+      },
+    }
+  ),
+
+  defineTool(
     'create_repo',
     'Create a repository on the Ghidra Server. The connecting user owns it, so imports and ' +
     'check-ins into it work straight away. There is no delete counterpart — Ghidra Server does ' +
@@ -458,6 +473,10 @@ export const multiProgramTools: ToolDefinition[] = [
         type: 'string',
         description: 'URL for the worker to fetch the binary from',
       },
+      uploadId: {
+        type: 'string',
+        description: 'A filled upload slot from request_upload — use this for a file that only exists on the client',
+      },
       localPath: {
         type: 'string',
         description: 'Path to the binary ON THE WORKER HOST (only useful when the worker runs locally)',
@@ -480,11 +499,12 @@ export const multiProgramTools: ToolDefinition[] = [
       },
       items: {
         type: 'array',
-        description: 'Several binaries in one job; each entry takes url/localPath/bytesBase64, programPath, processor, compilerSpec',
+        description: 'Several binaries in one job; each entry takes url/uploadId/localPath/bytesBase64, programPath, processor, compilerSpec',
         items: {
           type: 'object',
           properties: {
             url: { type: 'string' },
+            uploadId: { type: 'string' },
             localPath: { type: 'string' },
             bytesBase64: { type: 'string' },
             programPath: { type: 'string' },

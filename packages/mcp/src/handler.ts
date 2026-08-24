@@ -19,6 +19,18 @@ export interface ToolHandlerContext {
   /** A worker connected to the Ghidra Server with nothing open, for repo-scoped tools. */
   getRepoSession?(): Promise<string>;
 
+  /** Reserve an upload slot; the client PUTs a binary to the returned URL. */
+  createUpload?(filename?: string): {
+    uploadId: string;
+    uploadUrl: string;
+    expiresAt: Date;
+    maxBytes: number;
+  };
+  /** Where the WORKER can fetch a filled upload from, or null if it is not filled. */
+  getUploadFetchUrl?(uploadId: string): string | null;
+  /** Discard a spent upload slot and its bytes. */
+  consumeUpload?(uploadId: string): void;
+
   // Send command to a session's worker
   sendCommand(
     sessionId: string,
@@ -271,6 +283,18 @@ export class GhidraToolHandler {
         return { success: true };
       }
 
+      case 'request_upload': {
+        if (!this.context.createUpload) {
+          throw new Error('Uploads are not available in this context');
+        }
+        const slot = this.context.createUpload(args.filename as string | undefined);
+        return {
+          ...slot,
+          howTo: `PUT the binary as the raw request body to ${slot.uploadUrl}, then pass `
+            + `uploadId="${slot.uploadId}" to import_program.`,
+        };
+      }
+
       case 'list_session_aliases': {
         if (!this.context.listAliases) throw new Error('Alias management not available');
         return this.context.listAliases();
@@ -465,6 +489,13 @@ export class GhidraToolHandler {
     ]);
     // list_programs with no repo lists every repository, which is the useful default for
     // discovery — so it too runs on the repo worker when there is no session.
+    let spentUploads: string[] = [];
+    if (toolName === 'import_program') {
+      const resolved = this.resolveUploads(args);
+      spentUploads = resolved.spent;
+      args = { ...args, ...resolved.args };
+    }
+
     const needsRepoWorker = REPO_TOOLS.has(toolName) || toolName === 'list_programs';
     if (!sessionId && needsRepoWorker) {
       if (!this.context.getRepoSession) {
@@ -483,6 +514,12 @@ export class GhidraToolHandler {
 
     // Dispatch to worker
     const result = await this.dispatchToWorker(toolName, sessionId, args);
+
+    // An upload slot is spent once its bytes have been handed to an import: single use, so
+    // a stale id cannot quietly import the same file again later.
+    for (const uploadId of spentUploads) {
+      this.context.consumeUpload?.(uploadId);
+    }
 
     // Auto-sync mutations to linked sessions
     if (!args.skipSync && this.context.getLinksForEntity) {
@@ -514,6 +551,41 @@ export class GhidraToolHandler {
     }
 
     return result;
+  }
+
+  /**
+   * Turn any uploadId in an import into a URL the worker can fetch.
+   *
+   * The client uploaded to the daemon; the worker lives elsewhere and reaches the daemon
+   * over its own address, so the translation has to happen here rather than client-side.
+   */
+  private resolveUploads(
+    args: Record<string, unknown>
+  ): { args: Record<string, unknown>; spent: string[] } {
+    const spent: string[] = [];
+    const resolveOne = (spec: Record<string, unknown>): Record<string, unknown> => {
+      const uploadId = spec.uploadId as string | undefined;
+      if (!uploadId) return spec;
+      if (!this.context.getUploadFetchUrl) {
+        throw new Error('Uploads are not available in this context');
+      }
+      const url = this.context.getUploadFetchUrl(uploadId);
+      if (!url) {
+        throw new Error(
+          `Upload "${uploadId}" has nothing in it yet, has already been imported, or has `
+          + 'expired. Ask for a fresh slot with request_upload and PUT the binary to it.'
+        );
+      }
+      spent.push(uploadId);
+      const { uploadId: _drop, ...rest } = spec;
+      return { ...rest, url };
+    };
+
+    const out: Record<string, unknown> = resolveOne(args);
+    if (Array.isArray(args.items)) {
+      out.items = (args.items as Array<Record<string, unknown>>).map(resolveOne);
+    }
+    return { args: out, spent };
   }
 
   /**

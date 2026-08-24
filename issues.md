@@ -55,10 +55,17 @@ predate this work and reproduce on a clean tree).
 freshly imported program, `list_functions`, `close_session`, `delete_program` (with `force`
 for a checkout left by a dead worker). No residue left behind.
 
-**Known not working:** `move_program` fails with "is checked out" against a program a session
-has opened, because Ghidra registers the checkout server-side and the local project keeps a
-hold on it. `delete_program force` is the workaround; the move path needs more work.
+`move_program` and `delete_program` now work without `force`, including straight after a
+session has had the program open. Two causes: the rename path took a checkout first, which is
+exactly what Ghidra refuses to rename over; and the repo worker held its project (and so the
+files it imported) forever, which is now let go of after every job. `force` remains for a
+checkout a dead worker left behind.
+
 `delete_repo` was removed — Ghidra Server does not implement deleting a repository at all.
+
+**Verified end to end against the live server:** request_upload → PUT → import_program
+uploadId → create_session → list_functions → close_session → move_program → delete_program,
+leaving nothing behind. A `ghidra://` URL naming a different host is refused.
 
 The e2e fixtures are now pre-analysed `.gpr` projects (`npm run fixtures:ghidra`), since a
 session can no longer open a loose binary. They run serially: the suites share those
