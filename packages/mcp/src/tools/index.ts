@@ -559,7 +559,7 @@ export const multiProgramTools: ToolDefinition[] = [
       },
       force: {
         type: 'boolean',
-        description: 'Break a checkout left behind by a dead worker, losing anything uncommitted in it (default: false)',
+        description: 'Break a checkout left behind by a dead worker, losing anything uncommitted in it. Refuses another user\'s checkout — the server does not allow it (default: false)',
       },
     },
     ['programPath']
@@ -585,10 +585,58 @@ export const multiProgramTools: ToolDefinition[] = [
       },
       force: {
         type: 'boolean',
-        description: 'Break a checkout left behind by a dead worker, losing anything uncommitted in it (default: false)',
+        description: 'Break a checkout left behind by a dead worker, losing anything uncommitted in it. Refuses another user\'s checkout — the server does not allow it (default: false)',
       },
     },
     ['from', 'to']
+  ),
+
+  defineTool(
+    'list_checkouts',
+    'List outstanding checkouts on the Ghidra Server. A checkout is what a writable session ' +
+    'holds while it edits a program, and one left behind by a crashed worker is the usual ' +
+    'reason move_program or delete_program refuses. With nothing named it sweeps every ' +
+    'repository, which costs one server round trip per program — narrow it with repo, ' +
+    'programPath or filter on a large server.',
+    {
+      ...sessionIdProp,
+      repo: {
+        type: 'string',
+        description: 'Repository to scan (omit to scan every repository)',
+      },
+      programPath: {
+        type: 'string',
+        description: 'A single program to report on, repository first: "Diablo2Lod/windows/Game.exe"',
+      },
+      filter: {
+        type: 'string',
+        description: 'Case-insensitive substring a program path must contain to be checked',
+      },
+    }
+  ),
+
+  defineTool(
+    'terminate_checkout',
+    'Give a checkout back to the server. Use it to clear a checkout stranded by a worker that ' +
+    'died, so the program can be moved, deleted or opened writable again. Omit checkoutId to ' +
+    'terminate every checkout on the program. This is not a check-in: anything changed under ' +
+    'that checkout and never committed is lost. Take the ids from list_checkouts.',
+    {
+      ...sessionIdProp,
+      repo: {
+        type: 'string',
+        description: 'Repository, if you would rather not put it in programPath',
+      },
+      programPath: {
+        type: 'string',
+        description: 'Program whose checkout to terminate, repository first: "Diablo2Lod/windows/Game.exe"',
+      },
+      checkoutId: {
+        type: 'number',
+        description: 'Which checkout to terminate (omit for all of them on this program)',
+      },
+    },
+    ['programPath']
   ),
 
   defineTool(

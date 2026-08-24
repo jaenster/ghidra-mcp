@@ -146,6 +146,8 @@ export type WorkerCommand =
   | ImportStatusCommand
   | DeleteProgramCommand
   | MoveProgramCommand
+  | ListCheckoutsCommand
+  | TerminateCheckoutCommand
   // Version Tracking commands
   | VtCreateSessionCommand
   | VtRunCorrelatorCommand
@@ -1084,6 +1086,27 @@ export interface MoveProgramCommand extends BaseCommand {
     to: string;
     /** Break checkouts held by other projects (loses anything uncommitted in them). */
     force?: boolean;
+  };
+}
+
+export interface ListCheckoutsCommand extends BaseCommand {
+  command: 'list_checkouts';
+  params: {
+    /** Omit both repo and programPath to sweep every repository. */
+    repo?: string;
+    programPath?: string;
+    /** Case-insensitive substring a program path must contain to be checked. */
+    filter?: string;
+  };
+}
+
+export interface TerminateCheckoutCommand extends BaseCommand {
+  command: 'terminate_checkout';
+  params: {
+    repo?: string;
+    programPath: string;
+    /** Omit to terminate every checkout on the program. */
+    checkoutId?: number;
   };
 }
 

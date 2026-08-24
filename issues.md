@@ -233,3 +233,121 @@ them.
 
 Either `close_session` should say it decremented a refcount rather than closed, or take a `force`.
 `list_sessions` showing `clientCount` helps, but only if the close result mentions it.
+
+# Round three — a 516-binary import (2026-08-24)
+
+Importing every Windows D2 binary for every version: 516 PEs across 36 version folders, seven jobs,
+`analyze: false`. It worked, and nothing failed. What follows is what got in the way.
+
+## 13. `import_status` is unusable on a job of any size
+
+Issue 9 said the "Library not found" blocks bury the useful line. At 80 items per job they do not
+just bury it — they make the tool unanswerable:
+
+```
+import_status jobId=0be5ecf6
+  -> result (62,408 characters across 46 lines) exceeds maximum allowed tokens
+```
+
+That was a **40**-item job. The one line anybody wants is `done: 7 / failed: 0`, and it cannot be
+read without spooling 62 KB to a file and grepping it. For an MCP tool this is a hard failure, not
+a verbosity complaint: the polling call for a long-running job must always fit in a response.
+
+**Asking for**
+
+- `import_status` returns the summary only by default — `state`, `total`, `done`, `failed`,
+  `current`, and the failed items' paths and reasons.
+- The per-item import log behind a flag (`verbose: true`), or addressable per item
+  (`import_status jobId=… programPath=…`).
+- Failures are what matter; successes need one line each at most.
+
+## 14. "checked out" gives no way to find out by whom, and `force` is not the answer
+
+Moving a program that is checked out fails with:
+
+```
+move_program /windows/1.14d/CheckRevision.dll -> Error: CheckRevision.dll is checked out
+```
+
+`force` is documented as "break a checkout left behind by a dead worker, losing anything
+uncommitted in it". That framing suggests a stale-lock cleanup, so it looks like the obvious fix.
+It is not. The checkout here belonged to a live GUI:
+
+```
+move_program force=true -> Error: Undo-checkout not permitted, checkout was made by jaenster
+```
+
+— which is the *right* refusal, but it only appears after you have already asked for the
+destructive option. And the program genuinely had unsaved work: opening a session and committing it
+first produced **version 3**, so a `force` that had succeeded would have thrown that away.
+
+**Asking for**
+
+- The error names the holder and the age: "checked out by jaenster since 2026-08-23T14:02Z".
+- A read-only way to ask before acting — `list_programs` gaining `checkedOut` / `checkedOutBy`, or a
+  `checkout_status` call. Right now the only way to discover a checkout is to attempt a mutation.
+- `force`'s description should say it refuses another user's checkout, so it is not read as the
+  generic unstick.
+
+## 15. Batch import cross-links only within the job
+
+Auto-linking works and is genuinely useful, but it only sees what is already in the repository:
+
+```
+[D2CMP.DLL]  -> [/windows/classic/1.05/D2CMP.dll] (previously imported)
+[D2LANG.DLL] -> not found in project
+```
+
+Both are in the same job; `D2CMP` resolved because it happened to be imported earlier in the item
+list, `D2Lang` did not because it comes later alphabetically. So the link graph a version ends up
+with depends on the order items were passed, which is arbitrary. A second linking pass at the end
+of a job — or ordering by dependency — would make it deterministic.
+
+## 16. There is no way to ask what a program's source bytes were
+
+`get_program_info` reports the original import path (`/D:/___D2_REVERSE/1.14d/Game.exe`) but no hash
+of the loaded binary. `create_session` returns a `binaryHash`, but it does not match the SHA-256 of
+either candidate file on disk, so it appears to be over the Ghidra program rather than the PE. With
+36 versions of the same twenty DLL names in one repository, "which build is this actually" is a
+question that now gets asked constantly, and there is no way to answer it from the API.
+
+Exposing the imported file's MD5/SHA-256 — Ghidra already records it, the import log prints
+`?MD5=…` — would settle it.
+
+## 17. `move_program` reports "target exists" before it reports "checked out"
+
+Two blockers can stop a move, and the order they are checked in hides the one that matters:
+
+```
+move_program /windows/1.06b/Fog.dll -> /windows/classic/1.06b/Fog.dll
+  -> Error: Target already exists: /windows/classic/1.06b/Fog.dll
+
+move_program /windows/1.06b/Fog.dll -> /windows/_duplicates/classic/1.06b/Fog.dll
+  -> Error: Fog.dll is checked out
+```
+
+Same source file, one second apart. The first error is true but not the whole truth, and it is the
+one you get when moving to the place you actually want it. Acting on it — clearing the target,
+renaming things out of the way — is wasted work, because the move was never going to succeed.
+
+During a 90-program reorganisation this produced a wrong diagnosis: a batch that failed with
+"target exists" looked like the checkouts had been released, when nothing had changed.
+
+**Asking for:** validate the source first (it is the cheaper check and the harder blocker), or
+report all blocking conditions at once — "checked out by jaenster; target also exists".
+
+## 18. Nothing can release a checkout
+
+Once a checkout exists there is no way through the MCP to clear it:
+
+- `close_session` (with `force`) does not release it — the checkout outlives the session.
+- `commit` explicitly keeps it ("keeping the checkout so editing can continue").
+- `move_program force=true` refuses another user's, which is correct but leaves no path forward.
+- Closing the repository-level session and retrying changes nothing.
+
+So a checkout made once — by a GUI, or by a worker that died months ago — permanently pins that
+program's path until a human opens the Ghidra GUI and undoes it. For an agent doing bulk work that
+is a hard stop, and it is invisible up front (issue 14: there is no way to list checkouts).
+
+**Asking for:** an `undo_checkout` / `checkin` that can release a checkout the caller's own account
+holds, and `list_programs` surfacing `checkedOut` so a plan can route around them before starting.

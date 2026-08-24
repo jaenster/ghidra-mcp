@@ -62,6 +62,12 @@ public class CommandHandler {
             case "move_program":
                 return handleMoveProgram(params);
 
+            case "list_checkouts":
+                return handleListCheckouts(params);
+
+            case "terminate_checkout":
+                return handleTerminateCheckout(params);
+
             case "list_functions":
                 return handleListFunctions(params);
 
@@ -463,6 +469,31 @@ public class CommandHandler {
         }
         return engine.repo().moveProgram(fromSplit[0], fromSplit[1], toSplit[1],
                                          getBoolean(params, "force", false));
+    }
+
+    private JsonObject handleListCheckouts(JsonObject params) throws Exception {
+        String programPath = getString(params, "programPath", null);
+        String repo = getString(params, "repo", null);
+        // With a program named, the repository comes from it exactly as everywhere else;
+        // without one, a bare repo (or nothing at all, meaning every repo) is the scope.
+        if (programPath != null) {
+            String[] split = splitRepoPath(programPath, repo);
+            return engine.repo().listCheckouts(split[0], split[1], null);
+        }
+        return engine.repo().listCheckouts(repo, null, getString(params, "filter", null));
+    }
+
+    private JsonObject handleTerminateCheckout(JsonObject params) throws Exception {
+        String programPath = getString(params, "programPath", null);
+        if (programPath == null) {
+            throw new IllegalArgumentException("programPath is required");
+        }
+        String[] split = splitRepoPath(programPath, getString(params, "repo", null));
+        Long checkoutId = null;
+        if (params.has("checkoutId") && !params.get("checkoutId").isJsonNull()) {
+            checkoutId = params.get("checkoutId").getAsLong();
+        }
+        return engine.repo().terminateCheckout(split[0], split[1], checkoutId);
     }
 
     /**

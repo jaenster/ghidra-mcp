@@ -13,6 +13,8 @@ import ghidra.framework.model.DomainFolder;
 import ghidra.framework.model.Project;
 import ghidra.framework.model.ProjectData;
 import ghidra.framework.remote.RepositoryItem;
+import ghidra.framework.store.CheckoutType;
+import ghidra.framework.store.ItemCheckoutStatus;
 import ghidra.program.model.lang.CompilerSpec;
 import ghidra.program.model.lang.CompilerSpecID;
 import ghidra.program.model.lang.Language;
@@ -120,12 +122,7 @@ public class RepoOps {
         if (repoName == null || repoName.isEmpty()) {
             return listAllRepoPrograms(folder, recursive, filter);
         }
-        RepositoryServerAdapter server = requireServer();
-        RepositoryAdapter repo = server.getRepository(repoName);
-        repo.connect();
-        if (!repo.isConnected()) {
-            throw new IOException("Failed to connect to repository: " + repoName);
-        }
+        RepositoryAdapter repo = connectRepo(requireServer(), repoName);
 
         String root = (folder == null || folder.isEmpty()) ? "/" : normalizeFolder(folder);
         List<JsonObject> found = new ArrayList<>();
@@ -491,6 +488,163 @@ public class RepoOps {
         }
     }
 
+    // ============== Checkouts ==============
+
+    /**
+     * Every outstanding checkout, asked of the repository directly rather than through an
+     * open project. A checkout that nothing holds any more is the usual reason a move or a
+     * delete refuses, and the worker that took it is typically long gone — so this has to
+     * work without opening anything, and without taking a checkout of its own.
+     *
+     * The server keeps no index of checkouts, so finding them means asking per item. That is
+     * one round trip per program: narrow with programPath or filter when a repository is large.
+     */
+    public JsonObject listCheckouts(String repoName, String programPath, String filter)
+            throws Exception {
+        RepositoryServerAdapter server = requireServer();
+        List<String> repoNames = new ArrayList<>();
+        if (repoName != null && !repoName.isEmpty()) {
+            repoNames.add(repoName);
+        } else {
+            for (String name : server.getRepositoryNames()) {
+                repoNames.add(name);
+            }
+        }
+
+        JsonArray checkouts = new JsonArray();
+        int scanned = 0;
+        for (String name : repoNames) {
+            RepositoryAdapter repo;
+            try {
+                repo = connectRepo(server, name);
+            } catch (Exception e) {
+                // A repository this user cannot read must not sink the whole listing.
+                ctx.getLog().warn("Skipping repository '" + name + "': " + e.getMessage());
+                continue;
+            }
+            List<String> paths = new ArrayList<>();
+            if (programPath != null && !programPath.isEmpty()) {
+                paths.add(normalizeProgramPath(programPath));
+            } else {
+                collectItemPaths(repo, "/", filter, paths);
+            }
+            for (String path : paths) {
+                scanned++;
+                int slash = path.lastIndexOf('/');
+                String parent = slash <= 0 ? "/" : path.substring(0, slash);
+                String itemName = path.substring(slash + 1);
+                for (ItemCheckoutStatus status : repo.getCheckouts(parent, itemName)) {
+                    checkouts.add(checkoutJson(name, path, status));
+                }
+            }
+        }
+
+        JsonObject result = new JsonObject();
+        JsonArray repos = new JsonArray();
+        for (String name : repoNames) {
+            repos.add(name);
+        }
+        result.add("repos", repos);
+        result.add("checkouts", checkouts);
+        result.addProperty("total", checkouts.size());
+        result.addProperty("programsScanned", scanned);
+        return result;
+    }
+
+    /**
+     * Give a checkout back. With no id every checkout on the program goes, which is what
+     * clearing up after a crashed worker actually needs.
+     *
+     * Terminating is not a commit: anything changed under that checkout and never checked in
+     * is gone. The tool says so; there is no undo here to offer.
+     */
+    public JsonObject terminateCheckout(String repoName, String programPath, Long checkoutId)
+            throws Exception {
+        if (programPath == null || programPath.isEmpty()) {
+            throw new IllegalArgumentException("programPath is required");
+        }
+        RepositoryServerAdapter server = requireServer();
+        RepositoryAdapter repo = connectRepo(server, repoName);
+
+        String path = normalizeProgramPath(programPath);
+        int slash = path.lastIndexOf('/');
+        String parent = slash <= 0 ? "/" : path.substring(0, slash);
+        String itemName = path.substring(slash + 1);
+
+        ItemCheckoutStatus[] existing = repo.getCheckouts(parent, itemName);
+        if (existing.length == 0) {
+            throw new IOException("No outstanding checkouts on " + repoName + path);
+        }
+
+        JsonArray terminated = new JsonArray();
+        for (ItemCheckoutStatus status : existing) {
+            if (checkoutId != null && status.getCheckoutId() != checkoutId) {
+                continue;
+            }
+            ctx.getLog().warn("Terminating checkout " + status.getCheckoutId() + " of "
+                    + repoName + path + " held by " + status.getUser());
+            repo.terminateCheckout(parent, itemName, status.getCheckoutId(), true);
+            terminated.add(checkoutJson(repoName, path, status));
+        }
+        if (terminated.size() == 0) {
+            throw new IOException("No checkout " + checkoutId + " on " + repoName + path
+                    + " (it holds " + existing.length + " other checkout(s))");
+        }
+
+        JsonObject out = new JsonObject();
+        out.addProperty("success", true);
+        out.addProperty("program", repoName + path);
+        out.add("terminated", terminated);
+        out.addProperty("remaining", repo.getCheckouts(parent, itemName).length);
+        return out;
+    }
+
+    private JsonObject checkoutJson(String repoName, String path, ItemCheckoutStatus status) {
+        JsonObject o = new JsonObject();
+        o.addProperty("repo", repoName);
+        o.addProperty("program", repoName + path);
+        o.addProperty("checkoutId", status.getCheckoutId());
+        o.addProperty("user", status.getUser());
+        o.addProperty("version", status.getCheckoutVersion());
+        o.addProperty("exclusive", status.getCheckoutType() != CheckoutType.NORMAL);
+        o.addProperty("checkoutType", String.valueOf(status.getCheckoutType()));
+        o.addProperty("checkoutDate", status.getCheckoutDate().toInstant().toString());
+        if (status.getProjectName() != null) {
+            o.addProperty("project", status.getProjectName());
+        }
+        if (status.getUserHostName() != null) {
+            o.addProperty("host", status.getUserHostName());
+        }
+        return o;
+    }
+
+    private void collectItemPaths(RepositoryAdapter repo, String folder, String filter,
+                                  List<String> out) throws IOException {
+        for (RepositoryItem item : repo.getItemList(folder)) {
+            String path = joinPath(folder, item.getName());
+            if (filter != null && !path.toLowerCase().contains(filter.toLowerCase())) {
+                continue;
+            }
+            out.add(path);
+        }
+        for (String sub : repo.getSubfolderList(folder)) {
+            collectItemPaths(repo, joinPath(folder, sub), filter, out);
+        }
+    }
+
+    private RepositoryAdapter connectRepo(RepositoryServerAdapter server, String repoName)
+            throws IOException {
+        if (repoName == null || repoName.isEmpty()) {
+            throw new IllegalArgumentException("A repository is required");
+        }
+        RepositoryAdapter repo = server.getRepository(repoName);
+        repo.connect();
+        if (!repo.isConnected()) {
+            throw new IOException("Failed to connect to repository: " + repoName);
+        }
+        return repo;
+    }
+
     // ============== Delete / move ==============
 
     public JsonObject deleteProgram(String repoName, String programPath) throws Exception {
@@ -517,6 +671,10 @@ public class RepoOps {
         }
         if (force) {
             terminateOtherCheckouts(df);
+        }
+        if (isCheckedOutAnywhere(df)) {
+            throw new IOException(path + " cannot be deleted: it is " + describeCheckouts(df)
+                + ". Release it with terminate_checkout, or close the session using it.");
         }
         deleteDomainFile(df);
 
@@ -550,9 +708,6 @@ public class RepoOps {
         if (df == null) {
             throw new IOException("Program not found in repository " + repoName + ": " + from);
         }
-        if (projectData.getFile(to) != null) {
-            throw new IOException("Target already exists: " + to);
-        }
         if (from.equals(ctx.getActiveProgramPath())) {
             throw new IllegalStateException("Refusing to move the program this session has open: " + from);
         }
@@ -561,19 +716,24 @@ public class RepoOps {
             terminateOtherCheckouts(df);
         }
 
+        // The checkout is checked before the destination on purpose. Both can block a move,
+        // but a taken checkout is the harder blocker, and reporting "target already exists"
+        // first sent people off clearing the target for a move that was never going to run.
+        //
+        // Neither moving nor renaming a versioned file wants a checkout — Ghidra refuses both
+        // while one is outstanding. (Taking one first, as this used to, is precisely what made
+        // every rename fail with "<name> is checked out".)
+        if (isCheckedOutAnywhere(df)) {
+            throw new IOException(from + " cannot be moved: it is " + describeCheckouts(df)
+                + ". Release it with terminate_checkout, or close the session using it.");
+        }
+        if (projectData.getFile(to) != null) {
+            throw new IOException("Target already exists: " + to);
+        }
+
         int slash = to.lastIndexOf('/');
         String targetFolder = slash <= 0 ? "/" : to.substring(0, slash);
         String targetName = to.substring(slash + 1);
-
-        // Neither moving nor renaming a versioned file wants a checkout — Ghidra refuses
-        // both while one is outstanding. (Taking one first, as this used to, is precisely
-        // what made every rename fail with "<name> is checked out".) If something else holds
-        // one, say so and point at the way out.
-        if (df.isCheckedOut()) {
-            throw new IOException(from + " is checked out, so it cannot be moved. Close the "
-                + "session using it, or pass force=true to break the checkout (losing anything "
-                + "uncommitted in it).");
-        }
 
         DomainFolder folder = ensureFolder(projectData, targetFolder);
         if (!df.getParent().getPathname().equals(folder.getPathname())) {
@@ -594,6 +754,48 @@ public class RepoOps {
     // ============== Helpers ==============
 
     /**
+     * Whether anyone at all holds this program. {@code isCheckedOut} answers only for the
+     * project asking, so a checkout taken by a GUI or by another worker reads as false there
+     * and the move failed later with Ghidra's own bare "<name> is checked out".
+     */
+    private boolean isCheckedOutAnywhere(DomainFile df) {
+        if (!df.isVersioned()) {
+            return false;
+        }
+        try {
+            return df.getCheckouts().length > 0;
+        } catch (IOException e) {
+            return df.isCheckedOut();
+        }
+    }
+
+    /**
+     * Who holds a program and since when, so a refusal says what to do about it instead of
+     * only that something is in the way. Discovering that took a failed mutation before.
+     */
+    private String describeCheckouts(DomainFile df) {
+        try {
+            ItemCheckoutStatus[] checkouts = df.getCheckouts();
+            if (checkouts.length == 0) {
+                return "checked out";
+            }
+            StringBuilder sb = new StringBuilder("checked out by ");
+            for (int i = 0; i < checkouts.length; i++) {
+                if (i > 0) {
+                    sb.append(", ");
+                }
+                sb.append(checkouts[i].getUser())
+                  .append(" since ")
+                  .append(checkouts[i].getCheckoutDate().toInstant())
+                  .append(" (id ").append(checkouts[i].getCheckoutId()).append(")");
+            }
+            return sb.toString();
+        } catch (IOException e) {
+            return "checked out";
+        }
+    }
+
+    /**
      * Break checkouts held by other projects, so a program abandoned by a dead worker can be
      * moved or deleted. Destructive by nature — whatever was checked out and never committed
      * is lost — so it only ever happens on an explicit force.
@@ -602,7 +804,7 @@ public class RepoOps {
         if (!df.isVersioned()) {
             return;
         }
-        for (ghidra.framework.store.ItemCheckoutStatus checkout : df.getCheckouts()) {
+        for (ItemCheckoutStatus checkout : df.getCheckouts()) {
             ctx.getLog().warn("Terminating checkout " + checkout.getCheckoutId() + " of "
                     + df.getPathname() + " held by " + checkout.getUser() + " (force)");
             df.terminateCheckout(checkout.getCheckoutId());

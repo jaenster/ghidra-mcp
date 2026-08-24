@@ -161,6 +161,28 @@ dead worker.
 Opening a program checks it out; closing the session gives that checkout back unless the
 working copy has uncommitted changes, in which case it is kept so the work is not lost.
 
+### Checkouts
+
+A worker that is killed rather than closed leaves its checkout behind, and the server has no
+way to know it is dead — which is what makes a later `move_program`, `delete_program` or
+writable session refuse. `list_checkouts` shows what is outstanding, with the id, the user,
+the version and the host that took it, so a checkout from a worker that no longer exists is
+easy to spot:
+
+```
+list_checkouts                                   # every repository
+list_checkouts repo="Diablo2Lod" filter="1.09d"  # narrowed
+terminate_checkout programPath="Diablo2Lod/windows/1.09d/D2Game.dll" checkoutId=7
+```
+
+Omitting `checkoutId` terminates every checkout on that program. This is not a check-in:
+whatever was changed under that checkout and never committed is gone. Both work without a
+session, and neither takes a checkout of its own — they go straight to the repository, so
+they still work when nothing can open the program.
+
+There is no index of checkouts on the server, so a bare `list_checkouts` costs one round trip
+per program. Narrow it with `repo`, `programPath` or `filter` on a large server.
+
 Opening a **loose local binary is refused**: it would be imported into a project created for
 the session and destroyed with it, so the analysis could never be committed, shared or
 reopened. Import it first. A session opens a program from the repository, or a local `.gpr`

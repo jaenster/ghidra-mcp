@@ -486,6 +486,7 @@ export class GhidraToolHandler {
     const REPO_TOOLS = new Set([
       'list_repos', 'create_repo',
       'import_program', 'import_status', 'delete_program', 'move_program',
+      'list_checkouts', 'terminate_checkout',
     ]);
     // list_programs with no repo lists every repository, which is the useful default for
     // discovery — so it too runs on the repo worker when there is no session.
@@ -756,6 +757,30 @@ export class GhidraToolHandler {
             from: params.from as string,
             to: params.to as string,
             force: params.force as boolean | undefined,
+          },
+          timeout,
+        };
+
+      case 'list_checkouts':
+        return {
+          id,
+          command: 'list_checkouts',
+          params: {
+            repo: params.repo as string | undefined,
+            programPath: params.programPath as string | undefined,
+            filter: params.filter as string | undefined,
+          },
+          timeout,
+        };
+
+      case 'terminate_checkout':
+        return {
+          id,
+          command: 'terminate_checkout',
+          params: {
+            repo: params.repo as string | undefined,
+            programPath: params.programPath as string,
+            checkoutId: params.checkoutId as number | undefined,
           },
           timeout,
         };
