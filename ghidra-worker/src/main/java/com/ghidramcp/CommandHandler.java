@@ -387,8 +387,13 @@ public class CommandHandler {
         }
         // A programPath names its repository first ("Diablo2Lod/windows/Game.exe"), which is
         // the same form create_session and the listings use. An explicit repo overrides it.
+        //
+        // Only the caller's repo overrides: reading the repo off item 1 and then feeding it
+        // back in as the override made every later item repo-relative, so a batch of
+        // repository-first paths landed under Repo/Repo/....
+        String explicitRepo = repo;
         for (com.ghidramcp.operations.RepoOps.ImportSpec spec : specs) {
-            String[] split = splitRepoPath(spec.programPath, repo);
+            String[] split = splitRepoPath(spec.programPath, explicitRepo);
             if (repo == null) {
                 repo = split[0];
             } else if (!repo.equals(split[0])) {
