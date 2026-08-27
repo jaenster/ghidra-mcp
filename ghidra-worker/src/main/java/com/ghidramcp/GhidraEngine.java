@@ -357,6 +357,12 @@ public class GhidraEngine {
         return dataTypeOps.createTypedef(name, baseTypeName, category);
     }
 
+    public DataTypeResult createFuncdef(String name, String returnType,
+            java.util.List<FuncdefParam> parameters, String callingConvention,
+            String category) throws Exception {
+        return dataTypeOps.createFuncdef(name, returnType, parameters, callingConvention, category);
+    }
+
     public void deleteDataType(String name, String category) throws Exception {
         dataTypeOps.deleteDataType(name, category);
     }
@@ -838,6 +844,12 @@ public class GhidraEngine {
         public String category;
         public int size;
         public String warning;  // deprecation warning for old operation names
+    }
+
+    public static class FuncdefParam {
+        public String name;
+        public String dataType;
+        public String comment;
     }
 
     public static class CustomParameter {

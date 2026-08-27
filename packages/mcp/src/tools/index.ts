@@ -1838,6 +1838,49 @@ export const modificationTools: ToolDefinition[] = [
     ['name', 'baseType']
   ),
 
+  defineTool(
+    'create_funcdef',
+    'Create a function-definition datatype (funcdef) - the type a callback field or parameter '
+      + 'should have. Refer to it afterwards by name with a trailing * (e.g. "pfnFreeEntry *") in '
+      + 'update_structure, set_data_type or set_custom_signature. Give the calling convention '
+      + 'explicitly: a funcdef left at the default is the same wrong-convention trap set_prototype '
+      + 'used to cause.',
+    {
+      ...sessionIdProp,
+      name: {
+        type: 'string',
+        description: 'Funcdef name, e.g. "pfnLruFreeEntry"',
+      },
+      returnType: {
+        type: 'string',
+        description: 'Return type name (default: "void")',
+      },
+      parameters: {
+        type: 'array',
+        description: 'Parameters, in order',
+        items: {
+          type: 'object',
+          properties: {
+            name: { type: 'string', description: 'Parameter name (default: param_N)' },
+            dataType: { type: 'string', description: 'Type name, e.g. "D2UnitStrc *"' },
+            comment: { type: 'string', description: 'Parameter comment' },
+          },
+          required: ['dataType'],
+        },
+      },
+      callingConvention: {
+        type: 'string',
+        enum: ['__cdecl', '__stdcall', '__thiscall', '__fastcall', '__vectorcall', 'unknown'],
+        description: 'Calling convention of the pointed-to function',
+      },
+      category: {
+        type: 'string',
+        description: 'Data type category path',
+      },
+    },
+    ['name']
+  ),
+
   // Function attributes
   defineTool(
     'set_function_attributes',

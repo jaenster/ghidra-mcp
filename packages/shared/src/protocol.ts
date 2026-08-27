@@ -97,6 +97,7 @@ export type WorkerCommand =
   | CreateEnumCommand
   | CreateUnionCommand
   | CreateTypedefCommand
+  | CreateFuncdefCommand
   | UpdateStructureCommand
   | DeleteDataTypeCommand
   | DisassembleCommand
@@ -881,6 +882,17 @@ export interface CreateTypedefCommand extends BaseCommand {
   };
 }
 
+export interface CreateFuncdefCommand extends BaseCommand {
+  command: 'create_funcdef';
+  params: {
+    name: string;
+    returnType?: string;
+    parameters?: Array<{ name?: string; dataType: string; comment?: string }>;
+    callingConvention?: string;
+    category?: string;
+  };
+}
+
 export interface UpdateStructureCommand extends BaseCommand {
   command: 'update_structure';
   params: {
@@ -1209,6 +1221,7 @@ export type CommandResultMap = {
   'set_prototype': { success: boolean; warnings?: string[] };
   'set_custom_signature': { success: boolean };
   'create_structure': { success: boolean; dataType?: DataTypeInfo };
+  'create_funcdef': { success: boolean; name?: string; category?: string };
   'batch_rename': BatchResult;
   'execute_script': ScriptResult;
   'get_analysis_hints': { hints: AnalysisHint[] };

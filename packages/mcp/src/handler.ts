@@ -1575,6 +1575,22 @@ export class GhidraToolHandler {
           timeout,
         };
 
+      case 'create_funcdef':
+        return {
+          id,
+          command: 'create_funcdef',
+          params: {
+            name: params.name as string,
+            returnType: params.returnType as string | undefined,
+            parameters: params.parameters as
+              | Array<{ name?: string; dataType: string; comment?: string }>
+              | undefined,
+            callingConvention: params.callingConvention as string | undefined,
+            category: params.category as string | undefined,
+          },
+          timeout,
+        };
+
       case 'update_structure':
         return {
           id,

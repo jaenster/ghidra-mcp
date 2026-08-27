@@ -351,3 +351,127 @@ is a hard stop, and it is invisible up front (issue 14: there is no way to list 
 
 **Asking for:** an `undo_checkout` / `checkin` that can release a checkout the caller's own account
 holds, and `list_programs` surfacing `checkedOut` so a plan can route around them before starting.
+
+## 19. `create_typedef` accepts a type it cannot parse and silently makes it `undefined1`
+
+Creating a function-pointer typedef looks like it works:
+
+```
+create_typedef name=pfnLruFreeEntry baseType="void (*)(void *)" category=/Diablo2/Funcdefs
+  -> success: true
+     name: pfnLruFreeEntry
+     category: /Diablo2/Funcdefs
+```
+
+What was actually created:
+
+```
+get_data_type pfnLruFreeEntry
+  -> size: 1
+     description: Undefined Byte
+     type: typedef
+     underlyingType: undefined1
+```
+
+`baseType` is looked up as a name, not parsed as a C declaration, and an unresolved name falls back
+to `undefined1` instead of failing. The success response echoes back only `name` and `category` -
+neither of which reveals the problem - so nothing in the reply hints that the type is wrong.
+
+This is worse than a plain rejection. Applying that typedef to a struct field or a parameter puts a
+1-byte undefined where a 4-byte pointer belongs, which silently shifts nothing (the field keeps its
+slot) but makes every downstream decompile of that field wrong. It was only caught here by reading
+the type straight back.
+
+**Asking for:** either parse `baseType` through the same C parser `set_data_type` uses (it accepts
+`char *[5]` happily), or fail loudly on an unresolved base type. Never substitute `undefined1` for
+something the caller named explicitly.
+
+## 20. No way to create a function-definition datatype
+
+There is `create_structure`, `create_union`, `create_enum`, `create_typedef` and
+`create_shared_structure`, but nothing creates a `FunctionDefinitionDataType`. That is the type
+needed whenever a struct field or a parameter is a callback - `D2LRUCacheStrc.pfnFreeEntry`,
+`D2SkillArgStrc.fpFunction`, the missile client-hit table - and until it exists those stay
+`void *` / `undefined1 *`, which is one of the larger remaining sources of wrong decompilation
+in the D2 database.
+
+The workaround is `execute_script` with a Java body:
+
+```java
+ghidra.program.model.data.FunctionDefinitionDataType fd =
+    new ghidra.program.model.data.FunctionDefinitionDataType(cp, name, dtm);
+fd.setReturnType(ret);
+fd.setArguments(params);
+fd.setCallingConvention("__fastcall");
+dtm.addDataType(fd, ghidra.program.model.data.DataTypeConflictHandler.REPLACE_HANDLER);
+```
+
+That works, but it means every callback type needs a hand-written script, and `execute_script`
+is the one tool that cannot be handed to a constrained agent.
+
+**Asking for:** `create_funcdef(name, returnType, parameters[], callingConvention, category)`,
+mirroring `create_structure`'s shape. Note it has to accept a calling convention - most D2
+callbacks are `__fastcall`, and a funcdef defaulting to `__stdcall` would reintroduce issue 4.
+
+## 21. `set_custom_signature` updates the `@params` block but not the prose under it
+
+After retyping arg5 of `SPRITECACHE_LoadDCCAndCache` from `HANDLE *` to `uint32_t *`, the plate
+comment holds both the new and the old type:
+
+```
+@params
+  pnGfxData: ESI:4 (uint32_t *)          <- rewritten correctly
+...
+Function uses custom registers for function arguments!
+[byte * param_1@Stack[0x4]:4]
+[HANDLE * param_5@ESI:4]                 <- still the old type, and the old name
+```
+
+The generator emits plate comments verbatim into the published C++, so this ships a comment that
+contradicts the signature three lines above it. The stale block also re-states `param_N` names that
+were renamed years ago, so it reads as if the parameters have no names.
+
+Related: `@date` is rewritten to today on every signature change, which churns the diff of every
+regenerated source file even when only the type changed.
+
+**Asking for:** regenerate the whole `@`-template from current function state, or drop the
+"Function uses custom registers" block entirely - it duplicates `@params`, which is already correct.
+Leaving `@date` alone unless the description changes would also stop the regen diffs.
+
+## 22. The worker does not build unless `GHIDRA_HOME` happens to be the right version
+
+`ghidra-worker/build.gradle:19` takes the SDK from the ambient environment:
+
+```groovy
+def ghidraInstallDir = System.getenv('GHIDRA_HOME') ?: '/Applications/ghidra'
+```
+
+With `GHIDRA_HOME=/Users/jaenster/Applications/ghidra_12.0.2_PUBLIC` - which is what a shell picks
+up from the profile on this machine - `./gradlew jar` fails:
+
+```
+AnalysisOps.java:1382: error: no suitable constructor found for
+    JumpTable(Address,ArrayList<Address>,boolean,int)
+  constructor JumpTable.JumpTable(AddressSpace) is not applicable
+  constructor JumpTable.JumpTable(Address,ArrayList<Address>,boolean) is not applicable
+```
+
+The call site is correct. `ghidra.program.model.pcode.JumpTable` in 12.1.2 really does have the
+4-argument constructor (`javap` over `SoftwareModeling.jar` confirms it, and the code even carries a
+comment saying 12.1.2 added the trailing arg). The build was simply compiling against 12.0.2.
+`GHIDRA_HOME=/Users/jaenster/Applications/ghidra_12.1.2_PUBLIC ./gradlew jar` succeeds with no
+errors.
+
+The failure mode is bad because the error points at application code and names plausible-looking
+constructors, so it reads as API drift that needs a code change. It cost a detour on the way to an
+unrelated fix, and "fixing" it by rewriting the call to the 3-arg form would have silently broken
+switch overrides on the version actually deployed.
+
+The runbook already documents the sibling trap at *runtime*
+(`LanguageNotFoundException: Language version (V4.7 or later)` = `GHIDRA_HOME` pointed at 12.0.2);
+the same variable breaks the build, but much less legibly.
+
+**Asking for:** pin the version in the build rather than inheriting it - a `gradle.properties`
+`ghidraHome`, or a `build.gradle` preflight that reads
+`${ghidraInstallDir}/Ghidra/application.properties` and fails with
+"needs Ghidra 12.1.2, GHIDRA_HOME points at 12.0.2" before javac ever runs.

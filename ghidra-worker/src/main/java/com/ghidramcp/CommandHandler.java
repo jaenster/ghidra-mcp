@@ -238,6 +238,9 @@ public class CommandHandler {
             case "create_typedef":
                 return handleCreateTypedef(params);
 
+            case "create_funcdef":
+                return handleCreateFuncdef(params);
+
             case "update_structure":
                 return handleUpdateStructure(params);
 
@@ -1578,6 +1581,46 @@ public class CommandHandler {
         }
 
         GhidraEngine.DataTypeResult dtResult = engine.createTypedef(name, baseType, category);
+        engine.invalidateCache();
+
+        JsonObject result = new JsonObject();
+        result.addProperty("success", true);
+        result.addProperty("name", dtResult.name);
+        result.addProperty("category", dtResult.category);
+        // Report the size so a caller can see what was actually built rather than
+        // having to read the type back.
+        result.addProperty("size", dtResult.size);
+        return result;
+    }
+
+    private JsonObject handleCreateFuncdef(JsonObject params) throws Exception {
+        String name = getString(params, "name", null);
+        String returnType = getString(params, "returnType", "void");
+        String callingConvention = getString(params, "callingConvention", null);
+        String category = getString(params, "category", null);
+        JsonArray paramsArray = params.has("parameters")
+            ? params.getAsJsonArray("parameters") : new JsonArray();
+
+        if (name == null) {
+            throw new IllegalArgumentException("name is required");
+        }
+
+        List<GhidraEngine.FuncdefParam> defs = new ArrayList<>();
+        for (int i = 0; i < paramsArray.size(); i++) {
+            JsonObject o = paramsArray.get(i).getAsJsonObject();
+            GhidraEngine.FuncdefParam p = new GhidraEngine.FuncdefParam();
+            p.name = getString(o, "name", "param_" + (i + 1));
+            p.dataType = getString(o, "dataType", null);
+            p.comment = getString(o, "comment", null);
+            if (p.dataType == null) {
+                throw new IllegalArgumentException(
+                    "parameters[" + i + "].dataType is required");
+            }
+            defs.add(p);
+        }
+
+        GhidraEngine.DataTypeResult dtResult =
+            engine.createFuncdef(name, returnType, defs, callingConvention, category);
         engine.invalidateCache();
 
         JsonObject result = new JsonObject();

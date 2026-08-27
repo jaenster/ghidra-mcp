@@ -700,6 +700,61 @@ public class DataTypeOps {
     }
 
     /**
+     * Create a function-definition datatype (a funcdef), the type a callback
+     * field or parameter should have. Without one those stay void* /
+     * undefined1*, which loses the call signature at every indirect call site.
+     */
+    public GhidraEngine.DataTypeResult createFuncdef(String name, String returnType,
+            List<GhidraEngine.FuncdefParam> parameters, String callingConvention,
+            String category) throws Exception {
+        Program program = ctx.getProgram();
+        DataTypeManager dtm = program.getDataTypeManager();
+
+        int txId = program.startTransaction("Create funcdef");
+        try {
+            CategoryPath catPath = category != null && !category.isEmpty()
+                ? new CategoryPath(category)
+                : CategoryPath.ROOT;
+
+            FunctionDefinitionDataType fd = new FunctionDefinitionDataType(catPath, name, dtm);
+            fd.setReturnType(returnType != null && !returnType.isEmpty()
+                ? ctx.resolveDataType(returnType)
+                : VoidDataType.dataType);
+
+            if (parameters != null && !parameters.isEmpty()) {
+                ParameterDefinition[] defs = new ParameterDefinition[parameters.size()];
+                for (int i = 0; i < parameters.size(); i++) {
+                    GhidraEngine.FuncdefParam p = parameters.get(i);
+                    String pname = (p.name != null && !p.name.isEmpty())
+                        ? p.name : ("param_" + (i + 1));
+                    defs[i] = new ParameterDefinitionImpl(
+                        pname, ctx.resolveDataType(p.dataType), p.comment);
+                }
+                fd.setArguments(defs);
+            }
+
+            // Most D2 callbacks are __fastcall; a funcdef left at the default would
+            // reintroduce the wrong-convention problem set_prototype used to cause.
+            if (callingConvention != null && !callingConvention.isEmpty()) {
+                fd.setCallingConvention(callingConvention);
+            }
+
+            DataType added = dtm.addDataType(fd, DataTypeConflictHandler.REPLACE_HANDLER);
+
+            program.endTransaction(txId, true);
+
+            GhidraEngine.DataTypeResult result = new GhidraEngine.DataTypeResult();
+            result.name = added.getName();
+            result.category = added.getCategoryPath().getPath();
+            result.size = added.getLength();
+            return result;
+        } catch (Exception e) {
+            program.endTransaction(txId, false);
+            throw e;
+        }
+    }
+
+    /**
      * Delete a data type
      */
     public void deleteDataType(String name, String category) throws Exception {
