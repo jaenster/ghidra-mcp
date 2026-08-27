@@ -2141,7 +2141,12 @@ export const modificationTools: ToolDefinition[] = [
 
   defineTool(
     'set_function_variable_type',
-    'Change the data type of a local variable or parameter.',
+    'Change the data type of a local variable or parameter.\n' +
+    'The reply echoes resolvedType (the full category path the name landed on), and previousType. ' +
+    'A name is matched exactly against the program\'s own types first, then against the builtin ' +
+    'aliases case-insensitively, so "DWORD" finds WinDef.h/DWORD when the program has it. ' +
+    'If the new type is a different size the reply also carries previousSize/newSize, plus ' +
+    'removedVariables and warning when growing a stack slot displaced other locals.',
     {
       ...sessionIdProp,
       functionAddress: {
@@ -2154,7 +2159,7 @@ export const modificationTools: ToolDefinition[] = [
       },
       dataType: {
         type: 'string',
-        description: 'New data type',
+        description: 'New data type. Pass a category-qualified name (WinDef.h/DWORD) to pick one when the bare name is ambiguous.',
       },
       description: {
         type: 'string',

@@ -531,16 +531,16 @@ public class GhidraEngine {
         analysisOps.setFunctionVariableName(functionAddressStr, oldName, newName, description, force);
     }
 
-    public void setFunctionVariableType(String functionAddressStr, String variableName, String dataTypeName, String description) throws Exception {
-        analysisOps.setFunctionVariableType(functionAddressStr, variableName, dataTypeName, description, true, false);
+    public AnalysisOps.VariableTypeChange setFunctionVariableType(String functionAddressStr, String variableName, String dataTypeName, String description) throws Exception {
+        return analysisOps.setFunctionVariableType(functionAddressStr, variableName, dataTypeName, description, true, false);
     }
 
-    public void setFunctionVariableType(String functionAddressStr, String variableName, String dataTypeName, String description, boolean forceRemoveConflicts) throws Exception {
-        analysisOps.setFunctionVariableType(functionAddressStr, variableName, dataTypeName, description, forceRemoveConflicts, false);
+    public AnalysisOps.VariableTypeChange setFunctionVariableType(String functionAddressStr, String variableName, String dataTypeName, String description, boolean forceRemoveConflicts) throws Exception {
+        return analysisOps.setFunctionVariableType(functionAddressStr, variableName, dataTypeName, description, forceRemoveConflicts, false);
     }
 
-    public void setFunctionVariableType(String functionAddressStr, String variableName, String dataTypeName, String description, boolean forceRemoveConflicts, boolean forceGuard) throws Exception {
-        analysisOps.setFunctionVariableType(functionAddressStr, variableName, dataTypeName, description, forceRemoveConflicts, forceGuard);
+    public AnalysisOps.VariableTypeChange setFunctionVariableType(String functionAddressStr, String variableName, String dataTypeName, String description, boolean forceRemoveConflicts, boolean forceGuard) throws Exception {
+        return analysisOps.setFunctionVariableType(functionAddressStr, variableName, dataTypeName, description, forceRemoveConflicts, forceGuard);
     }
 
     // ============== VersionTrackingOps ==============

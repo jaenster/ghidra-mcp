@@ -259,6 +259,149 @@ describe('E2E: Modification Tools', { skip: SKIP_REASON, timeout: SUITE_TIMEOUT 
     });
   });
 
+  describe('Data Type Resolution', { timeout: ANALYSIS_TIMEOUT }, () => {
+    before(async () => {
+      await client.createSession(binaryPath);
+      // A program type whose name differs from the builtin alias only by case.
+      await call(client, 'create_typedef', {
+        name: 'DWORD',
+        baseType: 'uint',
+        category: '/Win32',
+      });
+    });
+
+    after(async () => {
+      await client.closeSession().catch(() => {});
+    });
+
+    it('should prefer a program type over a case-insensitive builtin alias', async () => {
+      await call(client, 'create_structure', {
+        name: 'ResolveExact',
+        category: '/Test',
+        fields: [{ name: 'flags', dataType: 'DWORD', offset: 0 }],
+      });
+
+      const detail = await call(client, 'get_data_type', {
+        name: 'ResolveExact',
+        category: '/Test',
+      });
+      const field = (detail.fields as Array<{ name: string; dataType: string }>)[0];
+      assert.strictEqual(
+        field.dataType,
+        'DWORD',
+        `'DWORD' must resolve to /Win32/DWORD, not the builtin dword/uint (got ${field.dataType})`
+      );
+    });
+
+    it('should still accept a category-qualified name', async () => {
+      await call(client, 'create_structure', {
+        name: 'ResolveQualified',
+        category: '/Test',
+        fields: [{ name: 'flags', dataType: 'Win32/DWORD', offset: 0 }],
+      });
+
+      const detail = await call(client, 'get_data_type', {
+        name: 'ResolveQualified',
+        category: '/Test',
+      });
+      const field = (detail.fields as Array<{ name: string; dataType: string }>)[0];
+      assert.strictEqual(field.dataType, 'DWORD');
+    });
+
+    it('should still resolve a builtin alias the program has no type for', async () => {
+      await call(client, 'create_structure', {
+        name: 'ResolveAlias',
+        category: '/Test',
+        fields: [{ name: 'count', dataType: 'uint32', offset: 0 }],
+      });
+
+      const detail = await call(client, 'get_data_type', {
+        name: 'ResolveAlias',
+        category: '/Test',
+      });
+      assert.strictEqual(detail.size, 4);
+    });
+
+    it('should reject an unknown type instead of silently using undefined1', async () => {
+      await assert.rejects(
+        () =>
+          call(client, 'create_structure', {
+            name: 'ResolveUnknown',
+            category: '/Test',
+            fields: [{ name: 'x', dataType: 'NoSuchTypeExists_zz', offset: 0 }],
+          }),
+        /Unknown data type/
+      );
+    });
+
+    it('should reject an ambiguous name instead of picking one', async () => {
+      await call(client, 'create_typedef', {
+        name: 'AMBI',
+        baseType: 'byte',
+        category: '/AmbiA',
+      });
+      await call(client, 'create_typedef', {
+        name: 'AMBI',
+        baseType: 'double',
+        category: '/AmbiB',
+      });
+
+      await assert.rejects(
+        () =>
+          call(client, 'create_structure', {
+            name: 'ResolveAmbiguous',
+            category: '/Test',
+            fields: [{ name: 'x', dataType: 'AMBI', offset: 0 }],
+          }),
+        /Ambiguous data type/
+      );
+
+      // The qualified name still works, which is what the error tells the caller to use.
+      const ok = await call(client, 'create_structure', {
+        name: 'ResolveDisambiguated',
+        category: '/Test',
+        fields: [{ name: 'x', dataType: 'AmbiB/AMBI', offset: 0 }],
+      });
+      assert.strictEqual(ok.success, true);
+    });
+
+    it('should report the resolved type when retyping a variable', async () => {
+      // A decompile satisfies the read-before-write guard and populates the locals.
+      let funcName: string | undefined;
+      for (const candidate of ['entry', 'main', '_main']) {
+        try {
+          await client.decompile({ name: candidate });
+          funcName = candidate;
+          break;
+        } catch {
+          /* try the next name */
+        }
+      }
+      assert.ok(funcName, 'Expected one of entry/main/_main to decompile');
+
+      const info = await call(client, 'get_function_info', { name: funcName });
+      const locals = (info.localVariables ?? []) as Array<{ name: string }>;
+      if (locals.length === 0) {
+        return; // nothing to retype in this fixture build
+      }
+
+      const result = await call(client, 'set_function_variable_type', {
+        functionAddress: info.entryPoint as string,
+        variableName: locals[0].name,
+        dataType: 'DWORD',
+      });
+
+      assert.strictEqual(result.success, true);
+      // The path is whichever equivalent DWORD typedef the program holds — the point is
+      // that it is a program typedef and not the builtin (which would report '/uint').
+      assert.match(
+        result.resolvedType as string,
+        /\/DWORD$/,
+        `retype should report the program's DWORD, not the builtin (got ${result.resolvedType})`
+      );
+    });
+  });
+
   describe('Bookmark Lifecycle', { timeout: ANALYSIS_TIMEOUT }, () => {
     let testAddress: string;
 

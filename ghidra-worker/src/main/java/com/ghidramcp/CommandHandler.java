@@ -1762,11 +1762,29 @@ public class CommandHandler {
             throw new IllegalArgumentException("functionAddress, variableName, and dataType are required");
         }
 
-        engine.setFunctionVariableType(functionAddress, variableName, dataType, description, forceRemoveConflicts, forceGuard);
+        com.ghidramcp.operations.AnalysisOps.VariableTypeChange change =
+            engine.setFunctionVariableType(functionAddress, variableName, dataType, description, forceRemoveConflicts, forceGuard);
         engine.invalidateCache();
 
         JsonObject result = new JsonObject();
         result.addProperty("success", true);
+        // Echo what the name actually resolved to. A name can land on a different type than
+        // the caller meant (the builtin 'dword' rather than WinDef.h/DWORD), so say which one
+        // was used instead of making the caller read the function back to find out.
+        result.addProperty("resolvedType", change.resolvedType);
+        if (change.previousType != null) {
+            result.addProperty("previousType", change.previousType);
+        }
+        if (change.sizeChanged) {
+            result.addProperty("previousSize", change.previousSize);
+            result.addProperty("newSize", change.newSize);
+        }
+        if (!change.removedVariables.isEmpty()) {
+            result.add("removedVariables", gson.toJsonTree(change.removedVariables));
+        }
+        if (change.warning != null) {
+            result.addProperty("warning", change.warning);
+        }
         return result;
     }
 

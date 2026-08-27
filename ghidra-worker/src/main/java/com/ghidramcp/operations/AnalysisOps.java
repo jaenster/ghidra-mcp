@@ -2245,18 +2245,35 @@ public class AnalysisOps {
     }
 
     /**
+     * What a retype actually did. The resolved type is echoed back so a caller does not have
+     * to re-read the function to find out which type its name landed on, and a storage-size
+     * change - plus any overlapping stack locals that were removed to make room - is reported
+     * rather than applied in silence.
+     */
+    public static class VariableTypeChange {
+        public String variable;
+        public String previousType;
+        public int previousSize;
+        public String resolvedType;
+        public int newSize;
+        public boolean sizeChanged;
+        public List<String> removedVariables = new ArrayList<>();
+        public String warning;
+    }
+
+    /**
      * Change a function variable's type.
      * Accepts both Ghidra API names (local_8, param_1) and decompiler names (iVar1, puVar2).
      */
-    public void setFunctionVariableType(String functionAddressStr, String variableName, String dataTypeName, String description) throws Exception {
-        setFunctionVariableType(functionAddressStr, variableName, dataTypeName, description, true, false);
+    public VariableTypeChange setFunctionVariableType(String functionAddressStr, String variableName, String dataTypeName, String description) throws Exception {
+        return setFunctionVariableType(functionAddressStr, variableName, dataTypeName, description, true, false);
     }
 
-    public void setFunctionVariableType(String functionAddressStr, String variableName, String dataTypeName, String description, boolean forceRemoveConflicts) throws Exception {
-        setFunctionVariableType(functionAddressStr, variableName, dataTypeName, description, forceRemoveConflicts, false);
+    public VariableTypeChange setFunctionVariableType(String functionAddressStr, String variableName, String dataTypeName, String description, boolean forceRemoveConflicts) throws Exception {
+        return setFunctionVariableType(functionAddressStr, variableName, dataTypeName, description, forceRemoveConflicts, false);
     }
 
-    public void setFunctionVariableType(String functionAddressStr, String variableName, String dataTypeName, String description, boolean forceRemoveConflicts, boolean forceGuard) throws Exception {
+    public VariableTypeChange setFunctionVariableType(String functionAddressStr, String variableName, String dataTypeName, String description, boolean forceRemoveConflicts, boolean forceGuard) throws Exception {
         Program program = ctx.getProgram();
         DecompInterface decompiler = ctx.getDecompiler();
         TaskMonitor monitor = ctx.getMonitor();
@@ -2273,6 +2290,11 @@ public class AnalysisOps {
 
         DataType newType = ctx.resolveDataType(dataTypeName);
 
+        VariableTypeChange change = new VariableTypeChange();
+        change.variable = variableName;
+        change.resolvedType = newType.getPathName();
+        change.newSize = newType.getLength();
+
         // Fast path: try direct match against API names (no decompile needed)
         Variable targetVar = null;
         for (Parameter param : func.getParameters()) {
@@ -2285,6 +2307,11 @@ public class AnalysisOps {
         }
 
         if (targetVar != null) {
+            DataType oldType = targetVar.getDataType();
+            change.previousType = oldType != null ? oldType.getPathName() : null;
+            change.previousSize = targetVar.getLength();
+            change.sizeChanged = change.previousSize != change.newSize;
+
             int txId = program.startTransaction("Set variable type");
             try {
                 if (forceRemoveConflicts && targetVar.isStackVariable()) {
@@ -2304,6 +2331,7 @@ public class AnalysisOps {
                         }
                     }
                     for (Variable var : toRemove) {
+                        change.removedVariables.add(var.getName());
                         func.removeVariable(var);
                     }
                 }
@@ -2311,7 +2339,8 @@ public class AnalysisOps {
                 ctx.updateFunctionPlateComment(func, description);
                 program.endTransaction(txId, true);
                 ctx.updateFunctionModCount(entryAddr);
-                return;
+                describeStorageChange(change, targetVar.isStackVariable(), dataTypeName);
+                return change;
             } catch (Exception e) {
                 program.endTransaction(txId, false);
                 throw e;
@@ -2325,6 +2354,11 @@ public class AnalysisOps {
                 ". Available variables: " + buildAvailableVarList(func));
         }
 
+        DataType oldHighType = highSym.getDataType();
+        change.previousType = oldHighType != null ? oldHighType.getPathName() : null;
+        change.previousSize = highSym.getSize();
+        change.sizeChanged = change.previousSize != change.newSize;
+
         int txId = program.startTransaction("Set variable type (decompiler)");
         try {
             // For params: null dataType is skipped (safe). We pass explicit type.
@@ -2336,10 +2370,41 @@ public class AnalysisOps {
             ctx.updateFunctionPlateComment(func, description);
             program.endTransaction(txId, true);
             ctx.updateFunctionModCount(entryAddr);
+            describeStorageChange(change,
+                highSym.getStorage() != null && highSym.getStorage().isStackStorage(),
+                dataTypeName);
+            return change;
         } catch (Exception e) {
             program.endTransaction(txId, false);
             throw e;
         }
+    }
+
+    /**
+     * Fill in the warning for a retype that changed the variable's storage size.
+     *
+     * Refusing outright would break legitimate work - widening an undefined4 slot to a real
+     * struct is a normal move - so this reports instead. It matters most for stack variables,
+     * where growing the slot silently deletes whatever locals the new size now covers.
+     */
+    private static void describeStorageChange(VariableTypeChange change, boolean isStack, String requestedName) {
+        if (!change.sizeChanged && change.removedVariables.isEmpty()) return;
+
+        StringBuilder sb = new StringBuilder();
+        if (change.sizeChanged) {
+            sb.append("'").append(requestedName).append("' resolved to ")
+              .append(change.resolvedType).append(", which is ").append(change.newSize)
+              .append(" bytes - the variable was ").append(change.previousSize).append(".");
+            if (isStack) {
+                sb.append(" The stack slot was resized.");
+            }
+        }
+        if (!change.removedVariables.isEmpty()) {
+            if (sb.length() > 0) sb.append(" ");
+            sb.append("Overlapping stack locals removed to make room: ")
+              .append(String.join(", ", change.removedVariables)).append(".");
+        }
+        change.warning = sb.toString();
     }
 
     /**

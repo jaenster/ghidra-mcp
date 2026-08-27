@@ -383,9 +383,14 @@ public class GhidraContext {
     public DataType resolveDataType(String typeName) {
         DataTypeManager dtm = program.getDataTypeManager();
 
+        if (typeName == null || typeName.trim().isEmpty()) {
+            throw new IllegalArgumentException("Data type name is empty");
+        }
+        String name = typeName.trim();
+
         // Check for array syntax: type[size]
         java.util.regex.Pattern arrayPattern = java.util.regex.Pattern.compile("^(.+?)\\[(\\d+)\\]$");
-        java.util.regex.Matcher arrayMatcher = arrayPattern.matcher(typeName);
+        java.util.regex.Matcher arrayMatcher = arrayPattern.matcher(name);
         if (arrayMatcher.matches()) {
             String baseTypeName = arrayMatcher.group(1);
             int arraySize = Integer.parseInt(arrayMatcher.group(2));
@@ -393,8 +398,36 @@ public class GhidraContext {
             return new ArrayDataType(baseType, arraySize, baseType.getLength(), dtm);
         }
 
-        // Handle common type aliases
-        switch (typeName.toLowerCase()) {
+        // Pointer syntax ("void*", "D2UnitStrc *"). Handled before anything else so the
+        // base name goes through the same resolution order.
+        if (name.endsWith("*")) {
+            String baseTypeName = name.substring(0, name.length() - 1).trim();
+            DataType baseType = resolveDataType(baseTypeName);
+            return dtm.getPointer(baseType);
+        }
+
+        // A category-qualified name is an explicit choice - look it up and nothing else.
+        if (name.indexOf('/') >= 0) {
+            String path = name.startsWith("/") ? name : "/" + name;
+            DataType found = dtm.getDataType(path);
+            if (found != null) return found;
+            throw new IllegalArgumentException(
+                "Unknown data type: '" + typeName + "'. Nothing lives at category path '"
+                + path + "' in this program's data type manager.");
+        }
+
+        // An exact, case-sensitive match in the program's own data type manager beats the
+        // builtin alias table below. The aliases are matched case-insensitively, so asking
+        // for the Win32 'DWORD' used to land on the builtin 'dword' (rendered 'uint') while
+        // WinDef.h/DWORD sat right there in the program, and 'ulong' used to land on an
+        // 8-byte ulonglong that resizes a stack slot on a 32-bit program. Both reported
+        // success. The program's own types are the more specific answer; prefer them.
+        DataType exact = findExactDataType(dtm, name);
+        if (exact != null) return exact;
+
+        // Builtin aliases, matched case-insensitively. Only reached when the program has no
+        // type of that exact name.
+        switch (name.toLowerCase()) {
             case "pointer":
             case "ptr":
                 return dtm.getPointer(DataType.DEFAULT);
@@ -437,41 +470,79 @@ public class GhidraContext {
             case "boolean":
                 return BooleanDataType.dataType;
             default:
-                // Handle pointer types (e.g., "void*", "int*", "char*")
-                if (typeName.endsWith("*")) {
-                    String baseTypeName = typeName.substring(0, typeName.length() - 1).trim();
-                    DataType baseType = resolveDataType(baseTypeName);
-                    return dtm.getPointer(baseType);
-                }
-
-                // Try to find it in the data type manager (root category first)
-                DataType found = dtm.getDataType("/" + typeName);
-                if (found != null) return found;
-
-                // Search all categories for the type name
-                java.util.ArrayList<DataType> foundList = new java.util.ArrayList<>();
-                dtm.findDataTypes(typeName, foundList);
-                if (!foundList.isEmpty()) {
-                    for (DataType dt : foundList) {
-                        if (dt.getName().equals(typeName) && !(dt instanceof Pointer) && !(dt instanceof Array)) {
-                            return dt;
-                        }
-                    }
-                    return foundList.get(0);
-                }
-
-                // Not found. Fail loudly rather than silently substituting undefined1:
-                // a caller that named "D2UnitStrc *" and got a 1-byte placeholder gets a
-                // success response and a corrupted type, with nothing in the reply to show
-                // it. Every caller of this method (struct fields, typedef bases,
-                // set_data_type, set_custom_signature return/param types,
-                // set_function_variable_type) is a place where that is wrong.
-                throw new IllegalArgumentException(
-                    "Unknown data type: '" + typeName + "'. It is not a builtin alias, not in "
-                    + "the program's data type manager, and not a pointer or array of one. "
-                    + "Note function-pointer syntax such as 'void (*)(void *)' is NOT parsed here "
-                    + "- create the function definition first, then refer to it by name.");
+                break;
         }
+
+        // Not found. Fail loudly rather than silently substituting undefined1:
+        // a caller that named "D2UnitStrc *" and got a 1-byte placeholder gets a
+        // success response and a corrupted type, with nothing in the reply to show
+        // it. Every caller of this method (struct fields, typedef bases,
+        // set_data_type, set_custom_signature return/param types,
+        // set_function_variable_type) is a place where that is wrong.
+        throw new IllegalArgumentException(
+            "Unknown data type: '" + typeName + "'. It is not a builtin alias, not in "
+            + "the program's data type manager, and not a pointer or array of one. "
+            + "Note function-pointer syntax such as 'void (*)(void *)' is NOT parsed here "
+            + "- create the function definition first, then refer to it by name.");
+    }
+
+    /**
+     * Exact, case-sensitive lookup of a bare type name in the program's data type manager.
+     * Returns null when nothing carries that name.
+     *
+     * When several types share the name, candidates that are equivalent to one another are
+     * collapsed (the same typedef pulled in from two headers is not a conflict). If what is
+     * left is still more than one genuinely different type, throw and name the candidates
+     * rather than picking one - the caller can then pass the category-qualified name. A
+     * silent pick between two different types is the failure this method exists to prevent.
+     */
+    private DataType findExactDataType(DataTypeManager dtm, String name) {
+        List<DataType> all = new ArrayList<>();
+        dtm.findDataTypes(name, all);
+        if (all.isEmpty()) return null;
+
+        List<DataType> named = new ArrayList<>();
+        for (DataType dt : all) {
+            if (dt.getName().equals(name) && !(dt instanceof Pointer) && !(dt instanceof Array)) {
+                named.add(dt);
+            }
+        }
+        if (named.isEmpty()) {
+            // Only pointer/array instances carry the name - preserve the old fallback.
+            return all.get(0);
+        }
+
+        List<DataType> distinct = new ArrayList<>();
+        for (DataType dt : named) {
+            boolean duplicate = false;
+            for (DataType kept : distinct) {
+                if (kept.getLength() == dt.getLength() && kept.isEquivalent(dt)) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (!duplicate) distinct.add(dt);
+        }
+
+        if (distinct.size() > 1) {
+            StringBuilder sb = new StringBuilder();
+            for (DataType dt : distinct) {
+                if (sb.length() > 0) sb.append(", ");
+                sb.append(dt.getPathName()).append(" (").append(dt.getLength()).append(" bytes)");
+            }
+            throw new IllegalArgumentException(
+                "Ambiguous data type: '" + name + "' matches " + distinct.size()
+                + " different types: " + sb + ". Pass the category-qualified name "
+                + "(for example '" + distinct.get(0).getPathName().replaceFirst("^/", "")
+                + "') to say which one you mean.");
+        }
+
+        // Prefer the root-category instance when duplicates were collapsed, so the answer
+        // is stable regardless of the order the manager happened to return them in.
+        for (DataType dt : named) {
+            if (dt.getCategoryPath() != null && dt.getCategoryPath().isRoot()) return dt;
+        }
+        return named.get(0);
     }
 
     // ============== PLATE comment management ==============
