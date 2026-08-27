@@ -460,8 +460,17 @@ public class GhidraContext {
                     return foundList.get(0);
                 }
 
-                // Return undefined if not found
-                return Undefined1DataType.dataType;
+                // Not found. Fail loudly rather than silently substituting undefined1:
+                // a caller that named "D2UnitStrc *" and got a 1-byte placeholder gets a
+                // success response and a corrupted type, with nothing in the reply to show
+                // it. Every caller of this method (struct fields, typedef bases,
+                // set_data_type, set_custom_signature return/param types,
+                // set_function_variable_type) is a place where that is wrong.
+                throw new IllegalArgumentException(
+                    "Unknown data type: '" + typeName + "'. It is not a builtin alias, not in "
+                    + "the program's data type manager, and not a pointer or array of one. "
+                    + "Note function-pointer syntax such as 'void (*)(void *)' is NOT parsed here "
+                    + "- create the function definition first, then refer to it by name.");
         }
     }
 
