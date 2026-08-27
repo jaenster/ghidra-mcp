@@ -18,6 +18,31 @@ repositories {
 // Ghidra installation path - can be overridden via command line
 def ghidraInstallDir = System.getenv('GHIDRA_HOME') ?: '/Applications/ghidra'
 
+// The worker must compile against the SAME Ghidra it will run under. Building against
+// an older SDK produces errors that look like application-code API drift - 12.0.2, for
+// instance, lacks the 4-arg ghidra.program.model.pcode.JumpTable constructor that
+// AnalysisOps uses, so the switch-override code fails to compile and reads as a bug in
+// our source. Fail early and say which version is actually on the path.
+def requiredGhidraVersion = '12.1.2'
+def ghidraProps = file("${ghidraInstallDir}/Ghidra/application.properties")
+if (!ghidraProps.exists()) {
+    throw new GradleException(
+        "GHIDRA_HOME does not look like a Ghidra installation: ${ghidraInstallDir}\n" +
+        "  (expected ${ghidraProps})\n" +
+        "  Set GHIDRA_HOME to a Ghidra ${requiredGhidraVersion} install.")
+}
+def foundGhidraVersion = ghidraProps.readLines()
+    .findAll { it.startsWith('application.version=') }
+    .collect { it.split('=', 2)[1].trim() }
+    .find { true }
+if (foundGhidraVersion != requiredGhidraVersion) {
+    throw new GradleException(
+        "Ghidra version mismatch: the worker needs ${requiredGhidraVersion}, " +
+        "GHIDRA_HOME points at ${foundGhidraVersion}.\n" +
+        "  GHIDRA_HOME=${ghidraInstallDir}\n" +
+        "  Build with: GHIDRA_HOME=/path/to/ghidra_${requiredGhidraVersion}_PUBLIC ./gradlew jar")
+}
+
 dependencies {
     // JSON processing
     implementation 'com.google.code.gson:gson:2.10.1'
