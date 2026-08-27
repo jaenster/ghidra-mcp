@@ -129,6 +129,10 @@ public class FunctionOps {
                 try {
                     DecompileResults dr = futures.get(fi).get();
                     applyEnrichment(results.get(idx), dr);
+                    // The bulk extractor asks for this same body via batch_decompile right
+                    // after it finishes listing. Hand the text over instead of decompiling
+                    // the whole program a second time.
+                    pool.cacheBody(funcs.get(idx), dr);
                 } catch (Exception e) {
                     // best-effort; raw types remain unchanged
                 }
@@ -534,6 +538,25 @@ public class FunctionOps {
     }
 
     /**
+     * Build a DecompileResult DTO from an already-decompiled body, matching what
+     * buildDecompileResult produces for a completed DecompileResults.
+     */
+    GhidraEngine.DecompileResult buildDecompileResult(Function func, String pseudocode) {
+        GhidraEngine.DecompileResult result = new GhidraEngine.DecompileResult();
+        result.functionName = func.getName();
+        result.address = func.getEntryPoint().toString();
+        result.signature = func.getSignature().getPrototypeString();
+        result.pseudocode = pseudocode;
+
+        List<JsonObject> parsedTags = ctx.parseStructuredTags(func);
+        if (!parsedTags.isEmpty()) {
+            result.tags = parsedTags;
+        }
+
+        return result;
+    }
+
+    /**
      * Build a DecompileResult DTO from raw DecompileResults.
      */
     GhidraEngine.DecompileResult buildDecompileResult(Function func, DecompileResults results) {
@@ -652,13 +675,28 @@ public class FunctionOps {
         // Decompile in parallel using the pool
         com.ghidramcp.DecompilerPool pool = ctx.getDecompilerPool();
         if (pool != null && functions.size() > 1) {
-            // Submit all to pool, collect in order
+            // A function listed earlier in this session already had its body decompiled to
+            // report resolved types; reuse that text rather than decompiling it again.
+            List<String> cachedBodies = new ArrayList<>(functions.size());
             List<Future<DecompileResults>> futures = new ArrayList<>(functions.size());
+            int cacheHits = 0;
             for (Function func : functions) {
-                futures.add(pool.submit(func, decompileTimeout));
+                String cached = pool.takeCachedBody(func);
+                cachedBodies.add(cached);
+                if (cached != null) cacheHits++;
+                futures.add(cached != null ? null : pool.submit(func, decompileTimeout));
+            }
+            if (cacheHits > 0) {
+                ctx.getLog().info("batch_decompile: " + cacheHits + "/" + functions.size()
+                        + " bodies reused from the list-pass decompile");
             }
             for (int i = 0; i < functions.size(); i++) {
                 Function func = functions.get(i);
+                String cached = cachedBodies.get(i);
+                if (cached != null) {
+                    result.results.add(buildDecompileResult(func, cached));
+                    continue;
+                }
                 try {
                     DecompileResults dr = futures.get(i).get();
                     result.results.add(buildDecompileResult(func, dr));
