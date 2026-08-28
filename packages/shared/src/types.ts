@@ -279,6 +279,22 @@ export interface DataTypeInfo {
   length: number;
   description?: string;
   kind: DataTypeKind;
+  /**
+   * Declared calling convention of a FUNCTION_DEFINITION, verbatim. Ghidra never
+   * leaves this blank: a funcdef with nothing set declares the literal 'unknown',
+   * and that value is reported as-is rather than folded to null, because it is the
+   * state that hands the funcdef to the compiler spec default at decompile time.
+   * Null on every other kind, which is how absent is told apart from unknown.
+   */
+  callingConvention?: string | null;
+  /**
+   * The convention the decompiler actually applies: the declared name resolved
+   * against the program's compiler spec, or the spec's default model when the
+   * declared name does not resolve (which is what 'unknown' does).
+   */
+  effectiveCallingConvention?: string | null;
+  /** True when the declared name is 'unknown' or is not a convention this compiler spec knows. */
+  hasUnknownCallingConvention?: boolean | null;
 }
 
 export type DataTypeKind =

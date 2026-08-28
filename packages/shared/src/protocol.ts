@@ -1221,7 +1221,7 @@ export type CommandResultMap = {
   'set_prototype': { success: boolean; warnings?: string[] };
   'set_custom_signature': { success: boolean };
   'create_structure': { success: boolean; dataType?: DataTypeInfo };
-  'create_funcdef': { success: boolean; name?: string; category?: string };
+  'create_funcdef': { success: boolean; name?: string; category?: string; callingConvention?: string | null; effectiveCallingConvention?: string | null; hasUnknownCallingConvention?: boolean | null };
   'batch_rename': BatchResult;
   'execute_script': ScriptResult;
   'get_analysis_hints': { hints: AnalysisHint[] };

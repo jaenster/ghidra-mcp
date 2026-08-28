@@ -1627,6 +1627,11 @@ public class CommandHandler {
         result.addProperty("success", true);
         result.addProperty("name", dtResult.name);
         result.addProperty("category", dtResult.category);
+        // Echo the convention the funcdef actually carries, so a caller that
+        // omitted one sees "unknown" here instead of discovering it later.
+        result.addProperty("callingConvention", dtResult.callingConvention);
+        result.addProperty("effectiveCallingConvention", dtResult.effectiveCallingConvention);
+        result.addProperty("hasUnknownCallingConvention", dtResult.hasUnknownCallingConvention);
         return result;
     }
 

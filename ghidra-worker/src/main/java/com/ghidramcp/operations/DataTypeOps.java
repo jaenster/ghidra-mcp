@@ -5,6 +5,8 @@ import com.ghidramcp.GhidraEngine;
 
 import ghidra.program.model.address.Address;
 import ghidra.program.model.data.*;
+import ghidra.program.model.lang.CompilerSpec;
+import ghidra.program.model.lang.PrototypeModel;
 import ghidra.program.model.listing.*;
 import ghidra.program.model.symbol.SourceType;
 import ghidra.program.model.symbol.Symbol;
@@ -23,6 +25,56 @@ public class DataTypeOps {
 
     public DataTypeOps(GhidraContext ctx) {
         this.ctx = ctx;
+    }
+
+    // ==================== CALLING CONVENTION VIEW ====================
+
+    /**
+     * The calling convention of a function-definition datatype, in the two forms
+     * that matter: what it declares, and what the decompiler will actually use.
+     *
+     * These differ, and the difference is not cosmetic. A funcdef whose declared
+     * name is "unknown" does not decompile with "no convention" - the compiler
+     * spec default takes over, and if that default derives the callee purge from
+     * the parameter count while the real callee purges nothing, the decompiler
+     * credits ESP twice per call site and its stack model drifts.
+     */
+    private static class ConventionView {
+        String declared;
+        String effective;
+        Boolean unknown;
+    }
+
+    /**
+     * Read both convention forms off a funcdef.
+     *
+     * {@code getCallingConventionName()} is the declared name. It is never null -
+     * Ghidra returns the literal "unknown" when nothing is set - so it is reported
+     * verbatim, including "unknown". Folding that to null would erase exactly the
+     * state a caller needs to detect.
+     *
+     * {@code getCallingConvention()} resolves that name against the program's
+     * compiler spec and returns the {@link PrototypeModel} that governs
+     * decompilation. It is null for an unknown or unrecognised name, in which case
+     * the decompiler falls back to the compiler spec's default model - so that is
+     * what gets reported as the effective convention.
+     *
+     * {@code getGenericCallingConvention()} is deliberately not used: Ghidra 12
+     * keeps only the deprecated setter, and the enum can only name its own six
+     * hardcoded values, never an arbitrary compiler-spec convention.
+     */
+    private ConventionView conventionOf(FunctionDefinition funcDef) {
+        ConventionView view = new ConventionView();
+        view.declared = funcDef.getCallingConventionName();
+        view.unknown = funcDef.hasUnknownCallingConventionName();
+
+        PrototypeModel model = funcDef.getCallingConvention();
+        if (model == null) {
+            CompilerSpec cspec = ctx.getProgram().getCompilerSpec();
+            model = cspec != null ? cspec.getDefaultCallingConvention() : null;
+        }
+        view.effective = model != null ? model.getName() : null;
+        return view;
     }
 
     // ==================== LIST / GET DATA TYPES ====================
@@ -82,6 +134,10 @@ public class DataTypeOps {
                 info.type = "array";
             } else if (dt instanceof FunctionDefinition) {
                 info.type = "function";
+                ConventionView cc = conventionOf((FunctionDefinition) dt);
+                info.callingConvention = cc.declared;
+                info.effectiveCallingConvention = cc.effective;
+                info.hasUnknownCallingConvention = cc.unknown;
             } else {
                 info.type = "builtin";
             }
@@ -176,10 +232,10 @@ public class DataTypeOps {
             ghidra.program.model.data.FunctionDefinition funcDef = (ghidra.program.model.data.FunctionDefinition) dt;
             detail.returnType = funcDef.getReturnType().getDisplayName();
             detail.hasVarArgs = funcDef.hasVarArgs();
-            String ccName = funcDef.getCallingConventionName();
-            if (ccName != null && !ccName.isEmpty() && !ccName.equals("unknown")) {
-                detail.callingConvention = ccName;
-            }
+            ConventionView cc = conventionOf(funcDef);
+            detail.callingConvention = cc.declared;
+            detail.effectiveCallingConvention = cc.effective;
+            detail.hasUnknownCallingConvention = cc.unknown;
             detail.parameters = new ArrayList<>();
             for (ghidra.program.model.data.ParameterDefinition param : funcDef.getArguments()) {
                 GhidraEngine.FunctionParamDetail pd = new GhidraEngine.FunctionParamDetail();
@@ -747,6 +803,15 @@ public class DataTypeOps {
             result.name = added.getName();
             result.category = added.getCategoryPath().getPath();
             result.size = added.getLength();
+            // Report the convention off the resolved type, not off the request: a
+            // caller that passed nothing gets back "unknown" and can see it landed
+            // that way without reading the type back.
+            if (added instanceof FunctionDefinition) {
+                ConventionView cc = conventionOf((FunctionDefinition) added);
+                result.callingConvention = cc.declared;
+                result.effectiveCallingConvention = cc.effective;
+                result.hasUnknownCallingConvention = cc.unknown;
+            }
             return result;
         } catch (Exception e) {
             program.endTransaction(txId, false);

@@ -862,6 +862,10 @@ public class GhidraEngine {
         public String name;
         public String category;
         public int size;
+        // Populated by createFuncdef only.
+        public String callingConvention;
+        public String effectiveCallingConvention;
+        public Boolean hasUnknownCallingConvention;
     }
 
     public static class SymbolInfo {
@@ -906,6 +910,11 @@ public class GhidraEngine {
         public int size;
         public String description;
         public String type;
+        // Function definitions only; null on every other kind, which is how a
+        // caller tells "not a funcdef" apart from a funcdef declaring "unknown".
+        public String callingConvention;
+        public String effectiveCallingConvention;
+        public Boolean hasUnknownCallingConvention;
     }
 
     public static class DataTypeDetail {
@@ -921,7 +930,12 @@ public class GhidraEngine {
         // FunctionDefinition fields
         public String returnType;
         public List<FunctionParamDetail> parameters;
+        // The declared convention, reported verbatim - "unknown" included, since
+        // that is the state that silently hands the funcdef to the compiler spec
+        // default at decompile time.
         public String callingConvention;
+        public String effectiveCallingConvention;
+        public Boolean hasUnknownCallingConvention;
         public boolean hasVarArgs;
 
         public static class EnumValueDetail {

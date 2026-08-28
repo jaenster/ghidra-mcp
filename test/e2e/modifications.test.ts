@@ -259,6 +259,152 @@ describe('E2E: Modification Tools', { skip: SKIP_REASON, timeout: SUITE_TIMEOUT 
     });
   });
 
+  // A funcdef that declares no calling convention does not decompile with "no
+  // convention" - the compiler spec default takes over. When that default derives
+  // the callee purge from the parameter count and the real callee purges nothing,
+  // the decompiler credits ESP twice at every call site and its stack model drifts.
+  // Callers can only detect that if "unknown" survives the wire as the literal
+  // "unknown" rather than being reported as no convention at all.
+  describe('Funcdef Calling Convention', { timeout: ANALYSIS_TIMEOUT }, () => {
+    interface ConventionView {
+      callingConvention?: string | null;
+      effectiveCallingConvention?: string | null;
+      hasUnknownCallingConvention?: boolean | null;
+    }
+    interface FuncdefResult extends ConventionView {
+      success: boolean;
+      name: string;
+    }
+    interface DataTypeDetail extends ConventionView {
+      name: string;
+      type: string;
+    }
+    interface DataTypeEntry extends ConventionView {
+      name: string;
+      type: string;
+    }
+
+    before(async () => {
+      await client.createSession(binaryPath);
+    });
+
+    after(async () => {
+      await client.closeSession().catch(() => {});
+    });
+
+    it('should echo a declared convention back from create_funcdef', async () => {
+      const result = await call<FuncdefResult>(client, 'create_funcdef', {
+        name: 'pfnKnownConv',
+        returnType: 'void',
+        parameters: [{ name: 'ctx', dataType: 'void *' }],
+        callingConvention: '__cdecl',
+        category: '/CcTest',
+      });
+
+      assert.strictEqual(result.success, true);
+      assert.strictEqual(result.callingConvention, '__cdecl');
+      assert.strictEqual(result.hasUnknownCallingConvention, false);
+      assert.strictEqual(
+        result.effectiveCallingConvention,
+        '__cdecl',
+        'A convention the compiler spec knows must resolve to itself'
+      );
+    });
+
+    it('should report a funcdef created without a convention as unknown', async () => {
+      const result = await call<FuncdefResult>(client, 'create_funcdef', {
+        name: 'pfnUnknownConv',
+        returnType: 'void',
+        parameters: [{ name: 'ctx', dataType: 'void *' }],
+        category: '/CcTest',
+      });
+
+      assert.strictEqual(result.success, true);
+      assert.strictEqual(
+        result.callingConvention,
+        'unknown',
+        'A funcdef with no convention must report the literal "unknown", not null'
+      );
+      assert.strictEqual(result.hasUnknownCallingConvention, true);
+      assert.ok(
+        result.effectiveCallingConvention,
+        'An unknown convention still decompiles as something - the compiler spec default'
+      );
+      assert.notStrictEqual(
+        result.effectiveCallingConvention,
+        'unknown',
+        'The effective convention is a real prototype model, never "unknown"'
+      );
+    });
+
+    it('should round-trip a declared convention through get_data_type', async () => {
+      const detail = await call<DataTypeDetail>(client, 'get_data_type', {
+        name: 'pfnKnownConv',
+        category: '/CcTest',
+      });
+
+      assert.strictEqual(detail.type, 'function');
+      assert.strictEqual(detail.callingConvention, '__cdecl');
+      assert.strictEqual(detail.hasUnknownCallingConvention, false);
+      assert.strictEqual(detail.effectiveCallingConvention, '__cdecl');
+    });
+
+    it('should round-trip an unknown convention through get_data_type', async () => {
+      const detail = await call<DataTypeDetail>(client, 'get_data_type', {
+        name: 'pfnUnknownConv',
+        category: '/CcTest',
+      });
+
+      assert.strictEqual(detail.type, 'function');
+      assert.strictEqual(
+        detail.callingConvention,
+        'unknown',
+        'get_data_type must not fold "unknown" away - that is the condition callers lint for'
+      );
+      assert.strictEqual(detail.hasUnknownCallingConvention, true);
+      assert.ok(detail.effectiveCallingConvention, 'Should name the fallback prototype model');
+    });
+
+    it('should carry the convention in list_data_types and leave it null on other kinds', async () => {
+      await call(client, 'create_typedef', {
+        name: 'CcTestAlias',
+        baseType: 'uint',
+        category: '/CcTest',
+      });
+
+      const listed = await call<{ dataTypes: DataTypeEntry[] }>(client, 'list_data_types', {
+        category: '/CcTest',
+        limit: 100,
+      });
+
+      const byName = new Map(listed.dataTypes.map((dt) => [dt.name, dt]));
+
+      const known = byName.get('pfnKnownConv');
+      assert.ok(known, 'pfnKnownConv should be listed under /CcTest');
+      assert.strictEqual(known.callingConvention, '__cdecl');
+      assert.strictEqual(known.hasUnknownCallingConvention, false);
+      assert.strictEqual(known.effectiveCallingConvention, '__cdecl');
+
+      const unknown = byName.get('pfnUnknownConv');
+      assert.ok(unknown, 'pfnUnknownConv should be listed under /CcTest');
+      assert.strictEqual(
+        unknown.callingConvention,
+        'unknown',
+        'A single list call must be enough to spot every funcdef declaring "unknown"'
+      );
+      assert.strictEqual(unknown.hasUnknownCallingConvention, true);
+
+      const alias = byName.get('CcTestAlias');
+      assert.ok(alias, 'CcTestAlias should be listed under /CcTest');
+      assert.strictEqual(
+        alias.callingConvention,
+        null,
+        'A non-funcdef has no convention at all, which must not read as "unknown"'
+      );
+      assert.strictEqual(alias.hasUnknownCallingConvention, null);
+    });
+  });
+
   describe('Data Type Resolution', { timeout: ANALYSIS_TIMEOUT }, () => {
     before(async () => {
       await client.createSession(binaryPath);

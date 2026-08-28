@@ -1844,7 +1844,8 @@ export const modificationTools: ToolDefinition[] = [
       + 'should have. Refer to it afterwards by name with a trailing * (e.g. "pfnFreeEntry *") in '
       + 'update_structure, set_data_type or set_custom_signature. Give the calling convention '
       + 'explicitly: a funcdef left at the default is the same wrong-convention trap set_prototype '
-      + 'used to cause.',
+      + 'used to cause. The response echoes callingConvention, effectiveCallingConvention and '
+      + 'hasUnknownCallingConvention off the created type, so omitting one shows up immediately.',
     {
       ...sessionIdProp,
       name: {
@@ -2253,7 +2254,11 @@ export const modificationTools: ToolDefinition[] = [
 export const advancedTools: ToolDefinition[] = [
   defineTool(
     'list_data_types',
-    'List available data types including structures, enums, and typedefs.',
+    'List available data types including structures, enums, and typedefs. Function-definition '
+      + 'types also report callingConvention (the declared name, "unknown" when none is set), '
+      + 'effectiveCallingConvention (what the decompiler actually applies - the compiler spec '
+      + 'default when the declared name does not resolve) and hasUnknownCallingConvention. Those '
+      + 'three are null on every other kind of data type.',
     {
       ...sessionIdProp,
       ...paginationProps,
@@ -2267,7 +2272,10 @@ export const advancedTools: ToolDefinition[] = [
 
   defineTool(
     'get_data_type',
-    'Get detailed information about a data type including structure fields and enum values.',
+    'Get detailed information about a data type including structure fields and enum values. For a '
+      + 'function definition this reports callingConvention verbatim, so a funcdef carrying '
+      + '"unknown" reads as "unknown" rather than as no convention at all, plus '
+      + 'effectiveCallingConvention and hasUnknownCallingConvention.',
     {
       ...sessionIdProp,
       name: {
