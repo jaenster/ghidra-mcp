@@ -180,18 +180,24 @@ public class FunctionOps {
             if (dt != null && !dt.startsWith("undefined"))
                 resolvedByName.put(hs.getName(), dt);
         }
+        // Report the decompiler's view in resolvedType, its own field - never appended to
+        // dataType, which has to stay a type name. The single-function path already does
+        // this; the batch path used by list_functions was concatenating a comment into the
+        // type, and consumers take dataType verbatim as the emitted declaration, so
+        // "undefined4 /* resolvedType: DWORD */" became the declared type and defeated
+        // every downstream type inference.
         for (GhidraEngine.VariableInfo v : info.localVariables) {
             if (v.dataType != null && v.dataType.startsWith("undefined")) {
                 String resolved = resolvedByName.get(v.name);
                 if (resolved != null)
-                    v.dataType = v.dataType + " /* resolvedType: " + resolved + " */";
+                    v.resolvedType = resolved;
             }
         }
         for (GhidraEngine.ParameterInfo p : info.parameters) {
             if (p.dataType != null && p.dataType.startsWith("undefined")) {
                 String resolved = resolvedByName.get(p.name);
                 if (resolved != null)
-                    p.dataType = p.dataType + " /* resolvedType: " + resolved + " */";
+                    p.resolvedType = resolved;
             }
         }
     }
