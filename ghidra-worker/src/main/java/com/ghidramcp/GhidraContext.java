@@ -71,6 +71,14 @@ public class GhidraContext {
     private final Map<String, DecompInterface> decompilers = new HashMap<>();
     private final Map<String, FlatProgramAPI> flatApis = new HashMap<>();
     private final Map<String, DirtyTracker> dirtyTrackers = new HashMap<>();
+    private final Map<String, ChangeJournal> changeJournals = new HashMap<>();
+    /**
+     * Applied to every change journal as its program is registered. Set once by the
+     * Worker; programs open and close over a session's life, so wiring the push here
+     * rather than over the map at startup is the difference between covering every
+     * program and covering only the ones that happened to be open first.
+     */
+    private java.util.function.Consumer<java.util.List<ChangeJournal.ChangeEvent>> changeBatchListener;
     private final Map<String, DecompilerPool> decompPools = new HashMap<>();
     private String activeProgramPath;
 
@@ -107,6 +115,19 @@ public class GhidraContext {
         return activeProgramPath != null ? dirtyTrackers.get(activeProgramPath) : null;
     }
     public Map<String, DirtyTracker> getDirtyTrackers() { return dirtyTrackers; }
+    /** Ordered change journal for the active program, or null if none is open. */
+    public ChangeJournal getChangeJournal() {
+        return activeProgramPath != null ? changeJournals.get(activeProgramPath) : null;
+    }
+    public ChangeJournal getChangeJournal(String path) { return changeJournals.get(path); }
+    public Map<String, ChangeJournal> getChangeJournals() { return changeJournals; }
+    public void setChangeBatchListener(
+            java.util.function.Consumer<java.util.List<ChangeJournal.ChangeEvent>> listener) {
+        this.changeBatchListener = listener;
+        for (ChangeJournal j : changeJournals.values()) {
+            j.setBatchListener(listener);
+        }
+    }
     public DecompilerPool getDecompilerPool() {
         return activeProgramPath != null ? decompPools.get(activeProgramPath) : null;
     }
@@ -147,6 +168,15 @@ public class GhidraContext {
         tracker.attach(prog);
         tracker.loadFromDisk();
         dirtyTrackers.put(path, tracker);
+        // Attach the ordered change journal. It runs alongside the dirty tracker rather
+        // than replacing it in one step, so existing consumers keep working while the
+        // live reconstruction daemon moves over to sequences.
+        ChangeJournal journal = new ChangeJournal(log);
+        journal.attach(prog);
+        if (changeBatchListener != null) {
+            journal.setBatchListener(changeBatchListener);
+        }
+        changeJournals.put(path, journal);
         // Also set as active
         this.program = prog;
         this.flatApi = api;

@@ -3,6 +3,7 @@ package com.ghidramcp;
 import com.ghidramcp.logging.Logger;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 
 import java.io.IOException;
@@ -300,6 +301,40 @@ public class DaemonClient {
 
         try (InputStream is = conn.getInputStream()) {
             return new String(is.readAllBytes(), StandardCharsets.UTF_8);
+        }
+    }
+
+    /**
+     * Push a batch of program changes to the daemon.
+     *
+     * Retried with a short backoff rather than dropped: a subscriber cannot tell a lost
+     * batch from a quiet program, so losing one is worse than being late with it. The
+     * journal on disk stays authoritative either way - a batch that never lands is still
+     * served by get_changes when the subscriber reconnects.
+     */
+    public void postChanges(JsonArray events) {
+        if (events == null || events.isEmpty()) return;
+        JsonObject body = new JsonObject();
+        body.addProperty("sessionId", sessionId);
+        body.add("events", events);
+
+        for (int attempt = 0; attempt < 3; attempt++) {
+            try {
+                post("/internal/worker/" + workerId + "/changes", body);
+                return;
+            } catch (IOException e) {
+                if (attempt == 2) {
+                    log.warn("change push failed after 3 attempts (" + events.size()
+                        + " events); subscribers will catch up via get_changes: " + e.getMessage());
+                    return;
+                }
+                try {
+                    Thread.sleep(200L * (attempt + 1));
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+            }
         }
     }
 

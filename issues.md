@@ -475,3 +475,32 @@ the same variable breaks the build, but much less legibly.
 `ghidraHome`, or a `build.gradle` preflight that reads
 `${ghidraInstallDir}/Ghidra/application.properties` and fails with
 "needs Ghidra 12.1.2, GHIDRA_HOME points at 12.0.2" before javac ever runs.
+
+---
+
+## `rename_symbol` silently does nothing to a plain label (2026-09-03)
+
+`rename_symbol` on a label answers `success: true` and echoes the new name, while the label keeps
+its old one. Reproduced on the `simple_main_arm64_macos` fixture:
+
+```
+create_label   address=0x100000 name=lbl_a     -> {"success":true,"changeSeq":1}
+rename_symbol  address=0x100000 newName=lbl_b  -> {"success":true,"newName":"lbl_b","changeSeq":2}
+get_data_at_address address=0x100000           -> {"symbol":{"name":"lbl_a","type":"Label"}}
+```
+
+The same call against a FUNCTION works correctly (`add_numbers` -> `probe_renamed_fn`, confirmed by
+`get_function_info`), so this is specific to labels, not to the call shape.
+
+Found while validating the new change journal, which is what makes it unambiguous: the reply claims
+success, but `changeSeq` does not advance and no `symbol.renamed` record is emitted - because
+nothing in the program actually moved. Previously this class of bug could only be caught by reading
+the symbol back, and the operating notes already carried a vaguer version of it ("a rename does not
+always stick", seen on `fnCursorVisibilityHook`). The journal localises it.
+
+`test/e2e/changes.test.ts` pins the current behaviour in "stays silent when a write changed nothing":
+it reads the label back and asserts the journal agrees with reality either way, so the test starts
+demanding an event the moment `rename_symbol` is fixed.
+
+**Asking for:** either rename the label, or return `success: false` with the reason. A write that
+reports success without writing is the worst of the three outcomes.

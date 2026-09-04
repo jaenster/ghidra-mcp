@@ -134,6 +134,8 @@ export type WorkerCommand =
   | DetectTableCommand
   | ExportTypeArchiveCommand
   | ImportTypeArchiveCommand
+  // Change journal
+  | GetChangesCommand
   // Batch tag command
   | BatchTagSymbolsCommand
   // Symbol navigation
@@ -1184,6 +1186,47 @@ export interface WorkerError {
 }
 
 // Type-safe response mappings
+/**
+ * One program change, in the order it happened.
+ *
+ * `seq` is the ordering authority and is unique for the life of a program's journal,
+ * across worker restarts. `mod` (Ghidra's modification number) and the transaction fields
+ * are diagnostic only: Ghidra flushes change records on a 500 ms timer rather than at
+ * commit, so one flush can span several transactions and the stamp is the most recently
+ * started one.
+ */
+export interface ChangeEvent {
+  seq: number;
+  mod: number;
+  ts: number;
+  kind:
+    | 'function.changed' | 'function.body' | 'function.signature'
+    | 'symbol.renamed'
+    | 'datatype.changed' | 'datatype.renamed' | 'datatype.replaced'
+    | 'datatype.added' | 'datatype.removed'
+    | 'data.changed'
+    | 'ref.added' | 'ref.removed'
+    | 'code.added' | 'code.removed'
+    | 'restored';
+  /** Which index of a consumer's model `key` addresses. */
+  target: 'function' | 'global' | 'datatype' | 'program';
+  /** Function entry point, global address, or datatype path name. */
+  key: string;
+  oldName?: string;
+  newName?: string;
+  txId?: number;
+  txDescription?: string;
+}
+
+/** Read the durable change journal. `since` is exclusive. */
+export interface GetChangesCommand extends BaseCommand {
+  command: 'get_changes';
+  params: {
+    since?: number;
+    limit?: number;
+  };
+}
+
 export type CommandResultMap = {
   'load_program': { loaded: boolean; programInfo?: ProgramInfo };
   'close_program': { closed: boolean };
@@ -1259,7 +1302,33 @@ export type CommandResultMap = {
   // Dirty tracking
   'get_dirty_symbols': { functions: string[]; dataTypes: string[]; globals: string[]; lastCleanVersion: number };
   'mark_clean': { version: number };
+  // Change journal
+  'get_changes': { events: ChangeEvent[]; head: number };
 };
+
+/** A background auto-analysis job, as analyze and analyze_status report it. */
+export interface AnalysisJob {
+  jobId: string;
+  /** queued | running | done | skipped | timeout | failed */
+  state: string;
+  program: string;
+  forced: boolean;
+  finished: boolean;
+  elapsedMs: number;
+  message?: string;
+  progress?: number;
+  maximum?: number;
+  functionsBefore?: number;
+  functionsAfter?: number;
+  symbolsBefore?: number;
+  symbolsAfter?: number;
+  saved: boolean;
+  committed: boolean;
+  commitResult?: string;
+  /** Why the check-in did not happen, when it did not. */
+  commitSkipped?: string;
+  error?: string;
+}
 
 export interface DataFlowNode {
   address: string;

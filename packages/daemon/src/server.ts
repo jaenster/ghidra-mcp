@@ -20,6 +20,7 @@ import type { LogStore } from './logging/store.js';
 import type { Logger } from './logging/logger.js';
 import type { ToolHandlerContext } from '@ghidra-mcp/mcp';
 import { UploadStore } from './uploads/store.js';
+import { ChangeStore, type ChangeEvent } from './changes/store.js';
 import type { WorkerCommand, WorkerResponse, WorkerReconnectRequest } from '@ghidra-mcp/shared/protocol';
 import type { LogEntry, LogQueryOptions } from '@ghidra-mcp/shared';
 import type { CommandLog } from './command-log.js';
@@ -55,6 +56,10 @@ export async function createServer(options: ServerOptions): Promise<{
   // Upload slots: a client asks for one over MCP, PUTs a binary to the URL it gets back,
   // then names that upload in import_program. The worker fetches it from the daemon.
   const uploads = new UploadStore({ dir: getUploadsDir() });
+
+  // Recent program changes, per session, in order. The durable copy is the worker's
+  // journal file; this only spares a connected subscriber a round trip.
+  const changes = new ChangeStore();
 
   // OAuth 2.1 authorization server (active only when GHIDRA_MCP_PUBLIC_URL +
   // GHIDRA_MCP_AUTH_SECRET are set). Gates the MCP transports below; health,
@@ -425,6 +430,20 @@ export async function createServer(options: ServerOptions): Promise<{
     res.json({ success: true });
   });
 
+  // The worker pushes each flushed batch of program changes here. Posting rather than
+  // riding the heartbeat: a heartbeat is lossy and five seconds apart, and a change feed
+  // that drops a batch is worse than no feed at all, because a subscriber cannot tell.
+  app.post('/internal/worker/:workerId/changes', (req: Request, res: Response) => {
+    const { sessionId, events } = req.body as { sessionId?: string; events?: ChangeEvent[] };
+    if (!sessionId || !Array.isArray(events)) {
+      res.status(400).json({ error: 'sessionId and events are required' });
+      return;
+    }
+    const accepted = changes.append(sessionId, events);
+    // The worker retries on anything but a 200, so acknowledge only what was stored.
+    res.json({ success: true, accepted: accepted.length, head: changes.head(sessionId) });
+  });
+
   app.post('/internal/worker/:workerId/heartbeat', (req: Request, res: Response) => {
     const { workerId } = req.params;
     const heartbeat = req.body;
@@ -582,6 +601,97 @@ export async function createServer(options: ServerOptions): Promise<{
   }
 
   // MCP JSON-RPC endpoint (simpler alternative to SSE for clients/testing)
+  /**
+   * Ordered change feed for a session.
+   *
+   * A subscriber resumes with `?since=N`, or with the standard `Last-Event-ID` header
+   * that browsers and SSE clients resend automatically. Everything after N is delivered
+   * before any live event, so a reconnect is indistinguishable from never having
+   * disconnected. When the daemon's buffer cannot cover the gap - it restarted, or the
+   * subscriber was away too long - the worker's durable journal is asked instead. If even
+   * that cannot answer, the stream says so with a `truncated` event rather than resuming
+   * at the live edge, because a silent gap reads exactly like "nothing changed".
+   */
+  app.get('/changes/:sessionId', requireAuth, async (req: Request, res: Response) => {
+    const sessionId = sessionManager.resolveSessionId(req.params.sessionId);
+    const lastEventId = req.headers['last-event-id'];
+    const sinceRaw = (req.query.since as string) ?? (typeof lastEventId === 'string' ? lastEventId : undefined);
+    let since = Number.parseInt(sinceRaw ?? '0', 10);
+    if (!Number.isFinite(since) || since < 0) since = 0;
+
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders();
+
+    const write = (event: string, data: unknown, id?: number) => {
+      if (id !== undefined) res.write(`id: ${id}\n`);
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    };
+
+    // Backlog first, and only then the live subscription, so ordering holds across the
+    // handover. Events that arrive while the backlog is being fetched are buffered here
+    // and flushed after it.
+    const pending: ChangeEvent[] = [];
+    let live = false;
+    let delivered = since;
+    const unsubscribe = changes.subscribe(sessionId, (batch) => {
+      if (!live) {
+        pending.push(...batch);
+        return;
+      }
+      for (const e of batch) {
+        if (e.seq <= delivered) continue;
+        write('change', e, e.seq);
+        delivered = e.seq;
+      }
+    });
+
+    req.on('close', () => {
+      unsubscribe();
+    });
+
+    write('connected', { sessionId, since });
+
+    try {
+      let backlog: ChangeEvent[];
+      if (changes.hasFrom(sessionId, since)) {
+        backlog = changes.since(sessionId, since);
+      } else {
+        const response = await sessionManager.sendCommand(sessionId, {
+          id: randomUUID(),
+          command: 'get_changes',
+          params: { since, limit: 10000 },
+        } as WorkerCommand);
+        const result = response.result as { events?: ChangeEvent[]; head?: number } | undefined;
+        backlog = result?.events ?? [];
+        if (backlog.length === 0 && (result?.head ?? 0) > since) {
+          write('truncated', { since, head: result?.head ?? 0 });
+        }
+      }
+      for (const e of backlog) {
+        write('change', e, e.seq);
+        delivered = Math.max(delivered, e.seq);
+      }
+    } catch (err) {
+      write('error', { message: err instanceof Error ? err.message : String(err) });
+    }
+
+    // Anything that arrived while the backlog was being fetched may already be in it.
+    // Sequence numbers make that cheap to settle without tracking identity.
+    for (const e of pending) {
+      if (e.seq <= delivered) continue;
+      write('change', e, e.seq);
+      delivered = e.seq;
+    }
+    pending.length = 0;
+    live = true;
+
+    const ping = setInterval(() => res.write(': ping\n\n'), 15000);
+    req.on('close', () => clearInterval(ping));
+  });
+
   app.post('/mcp/rpc', requireAuth, async (req: Request, res: Response) => {
     const { jsonrpc, id, method, params } = req.body;
 
