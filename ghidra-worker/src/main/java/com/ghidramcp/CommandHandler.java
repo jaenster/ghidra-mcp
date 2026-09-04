@@ -25,6 +25,10 @@ public class CommandHandler {
         this.log = log;
     }
 
+    public GhidraEngine engine() {
+        return engine;
+    }
+
     /**
      * Handle a command and return the result
      */
@@ -313,6 +317,12 @@ public class CommandHandler {
             case "reanalyze":
                 return handleReanalyze(params);
 
+            case "analyze":
+                return handleAnalyze(params);
+
+            case "analyze_status":
+                return handleAnalyzeStatus(params);
+
             // Switch table
             case "get_switch_table":
                 return handleGetSwitchTable(params);
@@ -358,6 +368,9 @@ public class CommandHandler {
 
             case "mark_clean":
                 return handleMarkClean();
+
+            case "get_changes":
+                return handleGetChanges(params);
 
             default:
                 throw new UnsupportedOperationException("Unknown command: " + command);
@@ -2070,6 +2083,30 @@ public class CommandHandler {
         return gson.toJsonTree(stackResult).getAsJsonObject();
     }
 
+    private JsonObject handleAnalyze(JsonObject params) throws Exception {
+        com.ghidramcp.operations.AutoAnalysisOps.Request req =
+            new com.ghidramcp.operations.AutoAnalysisOps.Request();
+        req.force = getBoolean(params, "force", false);
+        req.save = getBoolean(params, "save", true);
+        req.commit = getBoolean(params, "commit", true);
+        req.commitMessage = getString(params, "commitMessage", "Auto-analysis");
+        req.timeoutMs = getInt(params, "timeout", 0);
+
+        boolean wait = getBoolean(params, "wait", false);
+        int waitTimeout = getInt(params, "waitTimeout", 0);
+        return engine.autoAnalysis().analyze(req, wait, waitTimeout);
+    }
+
+    private JsonObject handleAnalyzeStatus(JsonObject params) {
+        String jobId = getString(params, "jobId", null);
+        if (jobId == null) {
+            JsonObject result = new JsonObject();
+            result.add("jobs", engine.autoAnalysis().listJobs());
+            return result;
+        }
+        return engine.autoAnalysis().status(jobId);
+    }
+
     private JsonObject handleReanalyze(JsonObject params) throws Exception {
         String address = getString(params, "address", null);
 
@@ -2266,6 +2303,37 @@ public class CommandHandler {
             return result;
         }
         return tracker.getDetailJson();
+    }
+
+    // ============== Change Journal ==============
+
+    /**
+     * Read the ordered change journal. `since` is exclusive, so a consumer that has
+     * processed up to N asks for N and receives everything after it - the same call
+     * whether it was away for a second or a day.
+     */
+    private JsonObject handleGetChanges(JsonObject params) {
+        JsonObject result = new JsonObject();
+        ChangeJournal journal = engine.getContext().getChangeJournal();
+        if (journal == null) {
+            result.add("events", new com.google.gson.JsonArray());
+            result.addProperty("head", 0);
+            return result;
+        }
+
+        long since = params.has("since") && !params.get("since").isJsonNull()
+            ? params.get("since").getAsLong() : 0;
+        int limit = params.has("limit") && !params.get("limit").isJsonNull()
+            ? params.get("limit").getAsInt() : 10000;
+        if (limit <= 0 || limit > 100000) limit = 10000;
+
+        com.google.gson.JsonArray events = new com.google.gson.JsonArray();
+        for (JsonObject e : journal.read(since, limit)) {
+            events.add(e);
+        }
+        result.add("events", events);
+        result.addProperty("head", journal.head());
+        return result;
     }
 
     private JsonObject handleMarkClean() {

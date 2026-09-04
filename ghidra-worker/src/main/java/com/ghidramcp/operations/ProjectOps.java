@@ -1002,30 +1002,6 @@ public class ProjectOps {
     }
 
     /**
-     * Run auto-analysis on the current program.
-     */
-    private void runAnalysis() {
-        Logger log = ctx.getLog();
-        Program program = ctx.getProgram();
-
-        log.info("Running auto-analysis...");
-        int txId = program.startTransaction("Auto-analysis");
-        try {
-            ghidra.app.plugin.core.analysis.AutoAnalysisManager mgr =
-                ghidra.app.plugin.core.analysis.AutoAnalysisManager.getAnalysisManager(program);
-            mgr.initializeOptions();
-            mgr.reAnalyzeAll(null);
-            mgr.startAnalysis(ctx.getMonitor());
-            program.endTransaction(txId, true);
-            log.info("Analysis complete");
-        } catch (Exception e) {
-            program.endTransaction(txId, false);
-            log.error("Analysis failed: " + e.getMessage());
-            e.printStackTrace();
-        }
-    }
-
-    /**
      * Create a decompiler for a specific program (reusable for multi-program).
      */
     private DecompInterface createDecompiler(Program program) {

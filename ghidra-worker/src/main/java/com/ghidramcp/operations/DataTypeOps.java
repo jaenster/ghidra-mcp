@@ -158,6 +158,24 @@ public class DataTypeOps {
     }
 
     /**
+     * Carry a bitfield component's BIT position onto the exported field record.
+     *
+     * `DataTypeComponent.getOffset()` gives only the byte; without the bit
+     * position a consumer has to assume the fields of a byte start at bit 0 and
+     * run consecutively, which is wrong wherever the original C left bits unused
+     * (D2MonStats2Txt byte 0x104 uses bits 4, 5 and 7 only). Left null for a
+     * non-bitfield component, so existing consumers see no change.
+     */
+    private void applyBitFieldDetail(GhidraEngine.FieldDetail field, DataTypeComponent comp) {
+        DataType compDt = comp.getDataType();
+        if (compDt instanceof BitFieldDataType) {
+            BitFieldDataType bf = (BitFieldDataType) compDt;
+            field.bitOffset = bf.getBitOffset();
+            field.bitSize = bf.getBitSize();
+        }
+    }
+
+    /**
      * Get detailed data type info
      */
     public GhidraEngine.DataTypeDetail getDataType(String name, String category) throws Exception {
@@ -198,6 +216,7 @@ public class DataTypeOps {
                 field.offset = comp.getOffset();
                 field.size = comp.getLength();
                 field.comment = comp.getComment();
+                applyBitFieldDetail(field, comp);
                 detail.fields.add(field);
             }
         } else if (dt instanceof Structure) {
@@ -211,6 +230,7 @@ public class DataTypeOps {
                 field.offset = comp.getOffset();
                 field.size = comp.getLength();
                 field.comment = comp.getComment();
+                applyBitFieldDetail(field, comp);
                 detail.fields.add(field);
             }
         } else if (dt instanceof ghidra.program.model.data.Enum) {

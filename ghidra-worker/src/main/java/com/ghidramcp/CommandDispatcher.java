@@ -42,7 +42,7 @@ public class CommandDispatcher {
     private static final Set<String> READ_COMMANDS = Set.of(
         "decompile", "batch_decompile", "batch_pcode",
         "list_repos", "list_functions", "list_programs", "list_strings", "list_segments",
-        "import_status",
+        "import_status", "analyze_status",
         "list_imports", "list_exports", "list_namespaces", "list_symbols",
         "list_data_types", "list_comments", "list_bookmarks", "list_equates",
         "get_program_info", "get_function_info", "get_function_summary",
@@ -51,12 +51,20 @@ public class CommandDispatcher {
         "get_analysis_hints", "get_disassembly", "get_stack_frame",
         "get_switch_table", "get_undo_history", "get_line_mappings",
         "get_global_variables", "get_data_at_address", "get_symbol_after",
-        "get_hexdump", "get_cache_version", "get_dirty_symbols",
+        "get_hexdump", "get_cache_version", "get_dirty_symbols", "get_changes",
         "read_memory", "read_data_value",
         "find_call_path", "find_functions_matching",
         "search", "trace_data_flow", "detect_table",
         "export_all_c", "export_type_archive",
         "vt_list_matches", "vt_get_correlators"
+    );
+
+    /**
+     * Commands that stay answerable while auto-analysis is rewriting the program: they
+     * read a job record, never the Program DB.
+     */
+    private static final Set<String> ANALYSIS_SAFE_COMMANDS = Set.of(
+        "analyze_status", "import_status", "get_changes"
     );
 
     public CommandDispatcher(CommandHandler handler, Logger log) {
@@ -75,6 +83,17 @@ public class CommandDispatcher {
      * Read commands run on the pool; write commands run on the caller's thread.
      */
     public Future<JsonObject> dispatch(String commandType, JsonObject params) {
+        // Auto-analysis runs on its own thread, outside this fence, and rewrites the whole
+        // program. Nothing else may touch the Program DB until it is done.
+        String analysisJob = handler.engine().autoAnalysis().runningJobId();
+        if (analysisJob != null && !ANALYSIS_SAFE_COMMANDS.contains(commandType)) {
+            CompletableFuture<JsonObject> rejected = new CompletableFuture<>();
+            rejected.completeExceptionally(new IllegalStateException(
+                "Auto-analysis in progress (job " + analysisJob + "); the program is being "
+                + "rewritten. Poll analyze_status until it reports finished."));
+            return rejected;
+        }
+
         if (READ_COMMANDS.contains(commandType)) {
             return readPool.submit(() -> {
                 fence.readLock().lock();
@@ -107,6 +126,15 @@ public class CommandDispatcher {
             log.info("CMD START [" + thread + "] " + commandType + " (write) " + truncateParams(params));
             try {
                 JsonObject result = handler.handle(commandType, params);
+                // Ghidra delivers change records on a 500 ms timer, not when the
+                // transaction ends, so a write that simply returns leaves its own change
+                // invisible for up to half a second. That timing - not a gap in what the
+                // listeners watch - is why struct-field and variable retypes used to look
+                // like they produced no event. Flush here, while the write lock is still
+                // held, and stamp the reply with the resulting sequence so a caller can
+                // wait for exactly its own change instead of guessing.
+                flushChangeEvents();
+                stampChangeSeq(result);
                 long elapsed = System.currentTimeMillis() - start;
                 String resultJson = gson.toJson(result);
                 log.info("CMD DONE  [" + thread + "] " + commandType + " (write) " + elapsed + "ms result=" + resultJson.length() + "ch");
@@ -120,6 +148,34 @@ public class CommandDispatcher {
                 fence.writeLock().unlock();
             }
             return future;
+        }
+    }
+
+    /** Force Ghidra to deliver any pending change records now. Best effort. */
+    private void flushChangeEvents() {
+        try {
+            var program = handler.engine().getProgram();
+            if (program != null) {
+                program.flushEvents();
+            }
+        } catch (Exception e) {
+            log.warn("flushEvents failed: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Record the journal position a write reached, so a caller knows the sequence at
+     * which its own change is readable. Without it a consumer polling get_changes cannot
+     * tell "not yet delivered" from "nothing happened".
+     */
+    private void stampChangeSeq(JsonObject result) {
+        try {
+            ChangeJournal journal = handler.engine().getContext().getChangeJournal();
+            if (journal != null && result != null) {
+                result.addProperty("changeSeq", journal.head());
+            }
+        } catch (Exception e) {
+            log.warn("changeSeq stamp failed: " + e.getMessage());
         }
     }
 

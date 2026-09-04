@@ -147,11 +147,30 @@ public class Worker {
             // Start background heartbeat so long-running commands don't cause staleness
             client.startHeartbeatThread();
 
+            // --analyze: a program that has never been analyzed is analyzed now. It runs as a
+            // background job rather than before registration, because full analysis takes far
+            // longer than the daemon's worker-startup timeout; until it finishes every other
+            // command is turned away with the job id to poll.
+            if (autoAnalyze) {
+                startAutoAnalysis();
+            }
+
             // Main command loop with parallel dispatch
             final AtomicReference<CommandDispatcher> dispatcherRef = new AtomicReference<>();
             CommandHandler handler = new CommandHandler(engine, log.child("CommandHandler"));
             CommandDispatcher dispatcher = new CommandDispatcher(handler, log.child("Dispatcher"));
             dispatcherRef.set(dispatcher);
+
+            // Push each flushed batch of program changes to the daemon as it happens.
+            // A subscriber gets them in about the time Ghidra's own flush timer takes,
+            // rather than on the next heartbeat, and the journal on disk covers whatever
+            // the push misses.
+            Gson changeGson = new Gson();
+            engine.getContext().setChangeBatchListener(events -> {
+                JsonArray arr = new JsonArray();
+                for (var e : events) arr.add(changeGson.toJsonTree(e));
+                client.postChanges(arr);
+            });
 
             // Wire thread status into heartbeat payload
             client.setHeartbeatExtraSupplier(() -> {
@@ -303,6 +322,31 @@ public class Worker {
     /**
      * Check if an exception indicates a lost connection to the daemon
      */
+    /**
+     * Queue the opening auto-analysis. Read-only sessions cannot be analyzed, and an
+     * already-analyzed program reports back as skipped.
+     */
+    private void startAutoAnalysis() {
+        if (engine.getProgram() == null) {
+            log.info("Auto-analyze requested but no program is open; skipping");
+            return;
+        }
+        if (readOnly) {
+            log.info("Auto-analyze requested but the session is read-only; skipping");
+            return;
+        }
+        try {
+            com.ghidramcp.operations.AutoAnalysisOps.Request req =
+                new com.ghidramcp.operations.AutoAnalysisOps.Request();
+            req.timeoutMs = analysisTimeout;
+            JsonObject job = engine.autoAnalysis().analyze(req, false, 0);
+            log.info("Auto-analysis " + job.get("state").getAsString()
+                     + " (job " + job.get("jobId").getAsString() + ")");
+        } catch (Exception e) {
+            log.error("Could not start auto-analysis: " + e.getMessage());
+        }
+    }
+
     private static boolean isConnectionError(Exception e) {
         Throwable t = e;
         while (t != null) {

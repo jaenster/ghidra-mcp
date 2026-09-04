@@ -2272,8 +2272,10 @@ export const advancedTools: ToolDefinition[] = [
 
   defineTool(
     'get_data_type',
-    'Get detailed information about a data type including structure fields and enum values. For a '
-      + 'function definition this reports callingConvention verbatim, so a funcdef carrying '
+    'Get detailed information about a data type including structure fields and enum values. A '
+      + 'bitfield field also carries bitOffset (the bit position of its least significant bit '
+      + 'within the storage unit at its byte offset) and bitSize; both are null on a non-bitfield. '
+      + 'For a function definition this reports callingConvention verbatim, so a funcdef carrying '
       + '"unknown" reads as "unknown" rather than as no convention at all, plus '
       + 'effectiveCallingConvention and hasUnknownCallingConvention.',
     {
@@ -2385,6 +2387,61 @@ export const advancedTools: ToolDefinition[] = [
   ),
 
   defineTool(
+    'analyze',
+    'Run full Ghidra auto-analysis on the program this session has open, then save it and — ' +
+    'on a Ghidra Server session — check it in, so the result outlives the session. ' +
+    'Analysis takes minutes on a real binary, so it runs as a background job: the call returns ' +
+    'a jobId and you poll analyze_status, unless you pass wait. ' +
+    'A program that is already analyzed reports state "skipped" — pass force to analyze it anyway. ' +
+    'While the job runs every other tool on this session is refused, because the program is being ' +
+    'rewritten underneath it. For a single function, reanalyze is the cheaper call.',
+    {
+      ...sessionIdProp,
+      force: {
+        type: 'boolean',
+        description: 'Analyze even if the program is already marked analyzed (default: false)',
+      },
+      save: {
+        type: 'boolean',
+        description: 'Save the working copy when analysis finishes (default: true)',
+      },
+      commit: {
+        type: 'boolean',
+        description: 'Check the result in as a new server version (default: true; ignored for non-server sessions)',
+      },
+      commitMessage: {
+        type: 'string',
+        description: 'Version comment for the check-in (default: "Auto-analysis")',
+      },
+      timeout: {
+        type: 'number',
+        description: 'Cancel analysis after this many ms, keeping what it produced (default: no limit)',
+      },
+      wait: {
+        type: 'boolean',
+        description: 'Hold the request until the job finishes instead of returning a jobId (default: false)',
+      },
+      waitTimeout: {
+        type: 'number',
+        description: 'How long to hold the request when wait is set, in ms (default: 900000)',
+      },
+    }
+  ),
+
+  defineTool(
+    'analyze_status',
+    'Check an analysis job started by analyze (or by a session opened with autoAnalyze). ' +
+    'Omit jobId to list every job this worker knows about. Answerable while analysis is running.',
+    {
+      ...sessionIdProp,
+      jobId: {
+        type: 'string',
+        description: 'Job to report on (omit for all)',
+      },
+    }
+  ),
+
+  defineTool(
     'delete_equate',
     'Remove an equate reference at an instruction operand. If no more references remain, the equate is deleted entirely.',
     {
@@ -2410,6 +2467,16 @@ export const advancedTools: ToolDefinition[] = [
     'Get the list of symbols (functions, data types, globals) that have been modified since the last clean mark. Used for incremental reconstruction.',
     {
       ...sessionIdProp,
+    }
+  ),
+
+  defineTool(
+    'get_changes',
+    'Read the ordered journal of program changes. `since` is exclusive: pass the highest seq you have processed and you get everything after it, so the same call serves a first read and a resume. Every write reports the `changeSeq` it reached, which is the value to wait for when confirming your own edit landed. Sequence numbers are unique for the life of the program and survive a worker restart.',
+    {
+      ...sessionIdProp,
+      since: { type: 'number', description: 'Return events with seq greater than this. Default 0 (from the beginning of the retained journal).' },
+      limit: { type: 'number', description: 'Maximum events to return. Default 10000.' },
     }
   ),
 

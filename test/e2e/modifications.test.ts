@@ -160,6 +160,39 @@ describe('E2E: Modification Tools', { skip: SKIP_REASON, timeout: SUITE_TIMEOUT 
       assert.ok(fieldNames.includes('value'), 'Should have value field');
     });
 
+    it('should report a bitfield\'s bit position, not just its byte', async () => {
+      // The byte offset alone cannot say WHICH bit a flag occupies, so a consumer
+      // has to assume a byte's fields run from bit 0 upward - wrong wherever the
+      // original C left bits unused. D2MonStats2Txt byte 0x104 is that case:
+      // bits 4, 5 and 7 carry flags, bits 0-3 and 6 carry nothing.
+      const created = await call(client, 'create_structure', {
+        name: 'BitPosStruct',
+        category: '/Test',
+        fields: [
+          { name: 'atBit4', dataType: 'int:1', offset: 0, bitOffset: 4 },
+          { name: 'atBit5', dataType: 'int:1', offset: 0, bitOffset: 5 },
+          { name: 'atBit7', dataType: 'int:1', offset: 0, bitOffset: 7 },
+          { name: 'plain', dataType: 'byte', offset: 1 },
+        ],
+      });
+      assert.strictEqual(created.success, true);
+
+      const result = await call(client, 'get_data_type', {
+        name: 'BitPosStruct',
+        category: '/Test',
+      });
+
+      const byName = new Map(
+        (result.fields as Array<Record<string, unknown>>).map(f => [f.name as string, f])
+      );
+      assert.strictEqual(byName.get('atBit4')?.bitOffset, 4);
+      assert.strictEqual(byName.get('atBit5')?.bitOffset, 5);
+      assert.strictEqual(byName.get('atBit7')?.bitOffset, 7);
+      assert.strictEqual(byName.get('atBit4')?.bitSize, 1);
+      // Null on a non-bitfield, so a consumer can tell "not a bitfield" from "bit 0".
+      assert.strictEqual(byName.get('plain')?.bitOffset ?? null, null);
+    });
+
     it('should list data types with filter', async () => {
       const result = await call(client, 'list_data_types', {
         filter: 'Test*',

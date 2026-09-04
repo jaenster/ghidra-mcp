@@ -28,6 +28,7 @@ public class GhidraEngine {
     private final DataTypeOps dataTypeOps;
     private final MemoryOps memoryOps;
     private final AnalysisOps analysisOps;
+    private final AutoAnalysisOps autoAnalysisOps;
     private final VersionTrackingOps vtOps;
 
     public GhidraEngine(String projectPath, Logger log) throws Exception {
@@ -40,6 +41,7 @@ public class GhidraEngine {
         this.dataTypeOps = new DataTypeOps(ctx);
         this.memoryOps = new MemoryOps(ctx);
         this.analysisOps = new AnalysisOps(ctx);
+        this.autoAnalysisOps = new AutoAnalysisOps(ctx, projectOps);
         this.vtOps = new VersionTrackingOps(ctx);
     }
 
@@ -116,6 +118,8 @@ public class GhidraEngine {
     // ============== RepoOps (repository-scoped, no program needed) ==============
 
     public RepoOps repo() { return repoOps; }
+
+    public AutoAnalysisOps autoAnalysis() { return autoAnalysisOps; }
 
     /** Connect to a Ghidra Server without opening any repository or program. */
     public void connectServer(String host, int port, String user, char[] password) throws Exception {
@@ -956,6 +960,22 @@ public class GhidraEngine {
         public int offset;
         public int size;
         public String comment;
+        /**
+         * Bitfields only (null otherwise): the bit position of the field's
+         * least-significant bit WITHIN the storage unit that starts at `offset`.
+         *
+         * Ghidra normalises a bitfield component to minimal storage - the stored
+         * component offset is `byteOffset + bitOffset/8` and the stored bit offset
+         * is `bitOffset % 8` (StructureDataType.insertBitFieldAt, little-endian) -
+         * so this is always relative to THIS record's `offset`, and for a
+         * one-byte storage unit it is 0..7.
+         *
+         * Without it a consumer can only assume the fields of a byte run from bit
+         * 0 upward, which is wrong wherever the original C left bits unused.
+         */
+        public Integer bitOffset;
+        /** Bitfields only (null otherwise): effective width in bits. */
+        public Integer bitSize;
     }
 
     public static class CommentInfo {

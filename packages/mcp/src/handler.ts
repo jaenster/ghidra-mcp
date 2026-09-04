@@ -1829,6 +1829,17 @@ export class GhidraToolHandler {
       case 'get_undo_history':
         return { id, command: 'get_undo_history', params: {}, timeout };
 
+      case 'get_changes':
+        return {
+          id,
+          command: 'get_changes',
+          params: {
+            since: params.since as number | undefined,
+            limit: params.limit as number | undefined,
+          },
+          timeout,
+        };
+
       // Analysis
       case 'get_stack_frame':
         return {
@@ -1849,6 +1860,37 @@ export class GhidraToolHandler {
             address: params.address as string | undefined,
           },
           timeout: 300000, // 5 min for full program re-analysis
+        };
+
+      case 'analyze': {
+        const wait = params.wait as boolean | undefined;
+        const waitTimeout = (params.waitTimeout as number | undefined) ?? 900000;
+        return {
+          id,
+          command: 'analyze',
+          params: {
+            force: params.force as boolean | undefined,
+            save: params.save as boolean | undefined,
+            commit: params.commit as boolean | undefined,
+            commitMessage: params.commitMessage as string | undefined,
+            timeout: params.timeout as number | undefined,
+            wait,
+            waitTimeout,
+          },
+          // Starting the job returns at once; waiting for it holds the worker call open,
+          // so the command has to outlive the wait the worker was asked for.
+          timeout: wait ? waitTimeout + 60000 : timeout,
+        };
+      }
+
+      case 'analyze_status':
+        return {
+          id,
+          command: 'analyze_status',
+          params: {
+            jobId: params.jobId as string | undefined,
+          },
+          timeout,
         };
 
       // Switch table

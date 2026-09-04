@@ -126,6 +126,8 @@ export type WorkerCommand =
   // Analysis commands
   | GetStackFrameCommand
   | ReanalyzeCommand
+  | AnalyzeCommand
+  | AnalyzeStatusCommand
   // Switch table command
   | GetSwitchTableCommand
   | SetSwitchOverrideCommand
@@ -750,6 +752,31 @@ export interface ReanalyzeCommand extends BaseCommand {
   };
 }
 
+export interface AnalyzeCommand extends BaseCommand {
+  command: 'analyze';
+  params: {
+    /** Analyze again even when the program is already marked analyzed. */
+    force?: boolean;
+    /** Save the working copy when analysis finishes (default: true). */
+    save?: boolean;
+    /** Check the result in as a new server version (default: true, server sessions only). */
+    commit?: boolean;
+    commitMessage?: string;
+    /** Cancel analysis after this many ms, keeping what it produced. 0 = no limit. */
+    timeout?: number;
+    /** Hold the command until the job finishes instead of returning a jobId. */
+    wait?: boolean;
+    waitTimeout?: number;
+  };
+}
+
+export interface AnalyzeStatusCommand extends BaseCommand {
+  command: 'analyze_status';
+  params: {
+    jobId?: string;
+  };
+}
+
 // Switch table command
 export interface GetSwitchTableCommand extends BaseCommand {
   command: 'get_switch_table';
@@ -1292,6 +1319,8 @@ export type CommandResultMap = {
   // Analysis
   'get_stack_frame': { frameSize: number; localSize: number; parameterSize: number; returnAddrOffset: number; variables: Array<{ offset: number; name: string; dataType: string; size: number; comment: string | null; isParameter: boolean }> };
   'reanalyze': { success: boolean; scope: string };
+  'analyze': AnalysisJob;
+  'analyze_status': AnalysisJob | { jobs: AnalysisJob[] };
   // Switch table
   'get_switch_table': { switchAddress: string; numCases: number; cases: Array<{ value: number; targetAddress: string; targetLabel?: string }>; defaultAddress?: string };
   'set_switch_override': { success: boolean; address: string; numCases: number; functionName: string };
