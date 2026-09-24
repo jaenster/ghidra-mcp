@@ -150,7 +150,7 @@ Returning the `programPath` and whether analysis finished. Notes from the use ca
   request — the D2R open already times out today (see below), and a fresh import is worse.
 - **Uploading from the client matters.** The worker cannot see this machine's disk (issue 1), so
   either the bytes go over the wire or the worker fetches a URL. A URL is enough for our case:
-  everything is on `https://files.typeguru.nl/diablo/patch files/`.
+  everything is on `https://files.typeguru.nl/diablo/diablo2/`.
 - `delete_program` and `move_program` for the same reason — an import that landed in the wrong place
   currently needs the GUI.
 
