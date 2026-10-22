@@ -15,7 +15,7 @@ ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 RUN apt-get update \
  && apt-get install -y --no-install-recommends curl unzip ca-certificates gnupg \
  && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
- && apt-get install -y --no-install-recommends nodejs \
+ && apt-get install -y --no-install-recommends nodejs=22.23.4-1nodesource1 \
  && corepack enable \
  && rm -rf /var/lib/apt/lists/*
 
@@ -43,7 +43,7 @@ FROM eclipse-temurin:21-jdk
 RUN apt-get update \
  && apt-get install -y --no-install-recommends curl ca-certificates gnupg fontconfig procps \
  && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
- && apt-get install -y --no-install-recommends nodejs \
+ && apt-get install -y --no-install-recommends nodejs=22.23.4-1nodesource1 \
  && rm -rf /var/lib/apt/lists/*
 
 ENV GHIDRA_HOME=/opt/ghidra
