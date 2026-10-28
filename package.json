@@ -21,7 +21,7 @@
     "test:e2e": "node --test --test-concurrency=1 --test-timeout=180000 --import tsx 'test/e2e/**/*.test.ts'",
     "test:e2e:debug": "DEBUG=1 node --test --test-concurrency=1 --test-timeout=180000 --import tsx 'test/e2e/**/*.test.ts'",
     "lint": "eslint packages/*/src/**/*.ts",
-    "typecheck": "tsc -p packages/shared/tsconfig.json --noEmit && tsc -p packages/mcp/tsconfig.json --noEmit && tsc -p packages/daemon/tsconfig.json --noEmit && tsc -p packages/cli/tsconfig.json --noEmit",
+    "typecheck": "tsc -p packages/shared/tsconfig.json --noEmit && tsc -p packages/mcp/tsconfig.json --noEmit && tsc -p packages/daemon/tsconfig.json --noEmit && tsc -p packages/cli/tsconfig.json --noEmit && tsc -p packages/gateway/tsconfig.json --noEmit",
     "typecheck:all": "tsc --build",
     "start": "pnpm --filter @ghidra-mcp/cli start",
     "dev": "pnpm --filter @ghidra-mcp/daemon dev",
@@ -37,6 +37,7 @@
     "ci:quick": "./scripts/ci.sh --skip-e2e"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
     "@types/node": "^20.11.0",
     "@typescript-eslint/eslint-plugin": "^6.19.0",
     "@typescript-eslint/parser": "^6.19.0",

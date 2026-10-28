@@ -1,0 +1,30 @@
+{
+  "name": "@ghidra-mcp/gateway",
+  "version": "1.0.0",
+  "description": "Public read-only MCP gateway in front of a dedicated Ghidra MCP daemon",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist *.tsbuildinfo",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "@ghidra-mcp/mcp": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.3.3",
+    "vitest": "^1.2.0"
+  }
+}

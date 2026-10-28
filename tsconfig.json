@@ -4,6 +4,7 @@
     { "path": "packages/shared" },
     { "path": "packages/mcp" },
     { "path": "packages/daemon" },
-    { "path": "packages/cli" }
+    { "path": "packages/cli" },
+    { "path": "packages/gateway" }
   ]
 }
