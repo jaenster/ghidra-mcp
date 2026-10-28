@@ -48,6 +48,7 @@ public class GhidraEngine {
     // ============== Direct context accessors ==============
 
     public GhidraContext getContext() { return ctx; }
+    public ProjectOps projectOps() { return projectOps; }
     public Program getProgram() { return ctx.getProgram(); }
     public FlatProgramAPI getFlatApi() { return ctx.getFlatApi(); }
     public long getCacheVersion() { return ctx.getCacheVersion(); }
@@ -592,6 +593,8 @@ public class GhidraEngine {
         public int pointerSize;
         public Integer version;
         public Integer latestVersion;
+        /** Read-only server sessions: when the served version was loaded (epoch ms). */
+        public Long versionLoadedAt;
     }
 
     public static class FunctionInfo {

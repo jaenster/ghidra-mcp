@@ -310,6 +310,12 @@ export class WorkerPool {
     }
     if (options.readOnly) {
       args.push('--read-only');
+      // Follow mode: a read-only server program reloads itself when a newer version is
+      // checked in. Off unless the daemon is started with GHIDRA_MCP_FOLLOW_VERSIONS_MS.
+      const followMs = followVersionsMs();
+      if (followMs > 0 && options.ghidraServer?.programPath) {
+        args.push('--follow-versions', String(followMs));
+      }
     }
 
     const spawnEnv: Record<string, string | undefined> = {
@@ -766,4 +772,12 @@ export class WorkerPool {
       threads: state.threads,
     }));
   }
+}
+
+/** Poll interval for read-only server sessions following the latest version; 0 = off. */
+export function followVersionsMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.GHIDRA_MCP_FOLLOW_VERSIONS_MS;
+  if (!raw) return 0;
+  const ms = Number(raw);
+  return Number.isFinite(ms) && ms > 0 ? Math.floor(ms) : 0;
 }

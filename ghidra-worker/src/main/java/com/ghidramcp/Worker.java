@@ -40,6 +40,9 @@ public class Worker {
     private final String serverRepo;
     private final String serverProgram;   // path within the repo
     private final String serverUser;
+    // Poll interval for following the latest server version (read-only server sessions); 0 = off.
+    private final long followVersionsMs;
+    private VersionFollower follower;
 
     private GhidraEngine engine;
     private DaemonClient client;
@@ -49,7 +52,8 @@ public class Worker {
     public Worker(String workerId, String sessionId, String daemonUrl,
                   String binaryPath, String projectPath, String programPath,
                   boolean autoAnalyze, int analysisTimeout, boolean readOnly,
-                  String serverHostPort, String serverRepo, String serverProgram, String serverUser) {
+                  String serverHostPort, String serverRepo, String serverProgram, String serverUser,
+                  long followVersionsMs) {
         this.workerId = workerId;
         this.sessionId = sessionId;
         this.daemonUrl = daemonUrl;
@@ -63,6 +67,7 @@ public class Worker {
         this.serverRepo = serverRepo;
         this.serverProgram = serverProgram;
         this.serverUser = serverUser;
+        this.followVersionsMs = followVersionsMs;
     }
 
     public void run() throws Exception {
@@ -160,6 +165,18 @@ public class Worker {
             CommandHandler handler = new CommandHandler(engine, log.child("CommandHandler"));
             CommandDispatcher dispatcher = new CommandDispatcher(handler, log.child("Dispatcher"));
             dispatcherRef.set(dispatcher);
+
+            if (followVersionsMs > 0) {
+                String followed = engine.getContext().getActiveProgramPath();
+                if (readOnly && serverProgram != null && followed != null
+                        && engine.getContext().getServedVersion() != null) {
+                    follower = new VersionFollower(engine, dispatcherRef::get, followed, followVersionsMs,
+                            log.child("VersionFollower"));
+                    follower.start();
+                } else {
+                    log.warn("--follow-versions applies only to a read-only, versioned server program; ignored");
+                }
+            }
 
             // Push each flushed batch of program changes to the daemon as it happens.
             // A subscriber gets them in about the time Ghidra's own flush timer takes,
@@ -312,6 +329,9 @@ public class Worker {
         } finally {
             log.info("Shutting down...");
             client.stopHeartbeatThread();
+            if (follower != null) {
+                follower.stop();
+            }
             if (engine != null) {
                 engine.close(true);
             }
@@ -390,6 +410,7 @@ public class Worker {
         String serverRepo = null;
         String serverProgram = null;
         String serverUser = null;
+        long followVersionsMs = 0;
 
         for (int i = 0; i < args.length; i++) {
             switch (args[i]) {
@@ -435,6 +456,9 @@ public class Worker {
                 case "--server-user":
                     serverUser = args[++i];
                     break;
+                case "--follow-versions":
+                    followVersionsMs = Long.parseLong(args[++i]);
+                    break;
             }
         }
 
@@ -473,7 +497,8 @@ public class Worker {
             Worker worker = new Worker(workerId, sessionId, daemonUrl,
                                        binaryPath, projectPath, programPath,
                                        autoAnalyze, analysisTimeout, readOnly,
-                                       serverHostPort, serverRepo, serverProgram, serverUser);
+                                       serverHostPort, serverRepo, serverProgram, serverUser,
+                                       followVersionsMs);
             worker.run();
         } catch (Exception e) {
             System.err.println("[Worker] Fatal error: " + e.getMessage());

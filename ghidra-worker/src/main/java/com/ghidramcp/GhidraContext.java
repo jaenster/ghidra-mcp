@@ -82,6 +82,12 @@ public class GhidraContext {
     private final Map<String, DecompilerPool> decompPools = new HashMap<>();
     private String activeProgramPath;
 
+    // Server version of the program this read-only session serves, the latest version the
+    // server last reported, and when the served version was loaded. Null outside server mode.
+    private volatile Integer servedVersion;
+    private volatile Integer serverLatestVersion;
+    private volatile long versionLoadedAt;
+
     public GhidraContext(String projectPath, Logger log, TaskMonitor monitor) {
         this.projectPath = projectPath;
         this.log = log;
@@ -198,6 +204,51 @@ public class GhidraContext {
         this.activeProgramPath = path;
         invalidateCache();
     }
+
+    /** The objects a program swap replaced; the caller releases them once no call uses them. */
+    public static final class Replaced {
+        public final Program program;
+        public final DecompInterface decompiler;
+        public final DecompilerPool pool;
+        public final DirtyTracker tracker;
+
+        Replaced(Program program, DecompInterface decompiler, DecompilerPool pool, DirtyTracker tracker) {
+            this.program = program;
+            this.decompiler = decompiler;
+            this.pool = pool;
+            this.tracker = tracker;
+        }
+    }
+
+    /**
+     * Replace a registered program with another copy of it (a newer server version). The
+     * caller holds the dispatcher's write lock, so no command sees a half-swapped context;
+     * the returned old objects are released after the lock is dropped.
+     */
+    public Replaced replaceProgram(String path, Program prog, FlatProgramAPI api, DecompInterface decomp) {
+        Replaced old = new Replaced(programs.get(path), decompilers.get(path), decompPools.get(path),
+                dirtyTrackers.get(path));
+        boolean wasActive = path.equals(activeProgramPath) || activeProgramPath == null;
+        String previousActive = activeProgramPath;
+        registerProgram(path, prog, api, decomp);
+        if (!wasActive && previousActive != null) {
+            switchProgram(previousActive);
+        }
+        invalidateCache();
+        return old;
+    }
+
+    public Integer getServedVersion() { return servedVersion; }
+    public Integer getServerLatestVersion() { return serverLatestVersion; }
+    public long getVersionLoadedAt() { return versionLoadedAt; }
+    public void setServedVersion(int version, long loadedAt) {
+        this.servedVersion = version;
+        this.versionLoadedAt = loadedAt;
+        if (serverLatestVersion == null || serverLatestVersion < version) {
+            this.serverLatestVersion = version;
+        }
+    }
+    public void setServerLatestVersion(int version) { this.serverLatestVersion = version; }
 
     // ============== Jython state ==============
 

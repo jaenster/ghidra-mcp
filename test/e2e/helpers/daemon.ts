@@ -154,7 +154,8 @@ async function stopDaemon(handle: DaemonHandle): Promise<void> {
 
   const timeoutPromise = new Promise<void>((resolve) => {
     setTimeout(() => {
-      if (!proc.killed) {
+      // proc.killed only says a signal was sent; exitCode says whether it worked.
+      if (proc.exitCode === null && proc.signalCode === null) {
         console.log('[cleanup] Force killing daemon...');
         proc.kill('SIGKILL');
       }
@@ -178,7 +179,8 @@ async function killOrphanedWorkers(daemonPort: number): Promise<void> {
 
   try {
     const { execSync } = await import('node:child_process');
-    const pattern = `localhost:${daemonPort}`;
+    // Daemons bound to 127.0.0.1 hand their workers that address, not localhost.
+    const pattern = `(localhost|127\\.0\\.0\\.1):${daemonPort}`;
     const result = execSync(
       `ps aux | grep -E "java.*ghidra.*${pattern}" | grep -v grep | awk '{print $2}'`,
       { encoding: 'utf-8', timeout: 5000 }

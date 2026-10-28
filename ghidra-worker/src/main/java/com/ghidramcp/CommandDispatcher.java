@@ -151,6 +151,19 @@ public class CommandDispatcher {
         }
     }
 
+    /**
+     * Run a task while no command runs: it waits for in-flight commands to finish and holds
+     * new ones back until it returns. Used to swap the served program between calls.
+     */
+    public void runExclusive(Runnable task) {
+        fence.writeLock().lock();
+        try {
+            task.run();
+        } finally {
+            fence.writeLock().unlock();
+        }
+    }
+
     /** Force Ghidra to deliver any pending change records now. Best effort. */
     private void flushChangeEvents() {
         try {

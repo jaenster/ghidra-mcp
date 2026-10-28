@@ -362,7 +362,14 @@ public class ProjectOps {
 
         Program program;
         if (readOnly) {
-            program = (Program) df.getReadOnlyDomainObject(ctx, DomainFile.DEFAULT_VERSION, monitor);
+            // No checkout: a read-only copy of one server version. Open the version the
+            // server reports right now, by number, so the version served is known exactly
+            // and a follower can tell when a newer one is checked in.
+            int version = df.isVersioned() ? serverVersionOf(df.getPathname()) : DomainFile.DEFAULT_VERSION;
+            program = (Program) df.getReadOnlyDomainObject(ctx, version, monitor);
+            if (version != DomainFile.DEFAULT_VERSION) {
+                ctx.setServedVersion(version, System.currentTimeMillis());
+            }
         } else {
             // Check out (non-exclusive) so we can edit and later check-in new versions.
             if (df.isVersioned() && !df.isCheckedOut()) {
@@ -392,6 +399,47 @@ public class ProjectOps {
         log.info("Shared program opened successfully: " + program.getName() +
                  " (" + program.getFunctionManager().getFunctionCount() + " functions, checkedOut=" +
                  df.isCheckedOut() + ")");
+    }
+
+    /**
+     * The current version of a program on the server, asked of the repository itself. A
+     * DomainFile's own version fields are a cached view that a read-only project only
+     * refreshes on server events, so they are not trusted for following.
+     */
+    public int serverVersionOf(String programPath) throws IOException {
+        Project project = ctx.getServerProject();
+        if (project == null || project.getRepository() == null) {
+            throw new IOException("No repository is open");
+        }
+        ghidra.framework.client.RepositoryAdapter repo = project.getRepository();
+        if (!repo.isConnected()) {
+            repo.connect();
+        }
+        int slash = programPath.lastIndexOf('/');
+        String folder = slash <= 0 ? "/" : programPath.substring(0, slash);
+        String name = programPath.substring(slash + 1);
+        ghidra.framework.remote.RepositoryItem item = repo.getItem(folder, name);
+        if (item == null) {
+            throw new IOException("Program is no longer in the repository: " + programPath);
+        }
+        return item.getVersion();
+    }
+
+    /**
+     * Open one server version of a program read-only, without a checkout and without
+     * touching the context. The caller swaps it in.
+     */
+    public Program openReadOnlyVersion(String programPath, int version) throws Exception {
+        DomainFile df = ctx.getProjectData().getFile(programPath);
+        if (df == null) {
+            throw new IOException("Program not found: " + programPath);
+        }
+        return (Program) df.getReadOnlyDomainObject(ctx, version, ctx.getMonitor());
+    }
+
+    /** A fresh decompiler for a program that is not (yet) the active one. */
+    public DecompInterface newDecompiler(Program program) {
+        return createDecompiler(program);
     }
 
     /**
@@ -710,6 +758,13 @@ public class ProjectOps {
         if (serverFile != null) {
             info.version = serverFile.getVersion();
             info.latestVersion = serverFile.getLatestVersion();
+        } else if (ctx.getServedVersion() != null) {
+            // Read-only server session: no checked-out file, the version is the one opened.
+            info.version = ctx.getServedVersion();
+            info.latestVersion = ctx.getServerLatestVersion();
+            if (ctx.getVersionLoadedAt() > 0) {
+                info.versionLoadedAt = ctx.getVersionLoadedAt();
+            }
         }
 
         return info;
