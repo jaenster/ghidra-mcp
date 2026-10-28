@@ -254,10 +254,7 @@ export class K8sPodLauncher implements WorkerLauncher {
                 valueFrom: { secretKeyRef: { name: 'ghidra-mcp-server', key: 'GHIDRA_SERVER_PASSWORD' } },
               },
             ],
-            resources: {
-              requests: { memory: `${heapMi}Mi` },
-              limits: { memory: `${limitMi}Mi` },
-            },
+            resources: workerResources(heapMi, limitMi),
             volumeMounts: [{ name: 'data', mountPath: '/data' }],
           },
         ],
@@ -265,6 +262,26 @@ export class K8sPodLauncher implements WorkerLauncher {
       },
     };
   }
+}
+
+/**
+ * Worker pod resources. By default the pod requests its heap and may grow to the
+ * limit. GHIDRA_MCP_WORKER_GUARANTEED=1 requests the full limit instead, so a full
+ * node leaves the worker Pending rather than letting it squeeze other workloads;
+ * GHIDRA_MCP_WORKER_CPU (e.g. "1") then sets CPU request and limit alike, which
+ * makes the pod Guaranteed.
+ */
+export function workerResources(
+  heapMi: number,
+  limitMi: number,
+  env: NodeJS.ProcessEnv = process.env,
+): { requests: Record<string, string>; limits: Record<string, string> } {
+  if (env.GHIDRA_MCP_WORKER_GUARANTEED !== '1') {
+    return { requests: { memory: `${heapMi}Mi` }, limits: { memory: `${limitMi}Mi` } };
+  }
+  const cpu = env.GHIDRA_MCP_WORKER_CPU?.trim();
+  const both: Record<string, string> = { memory: `${limitMi}Mi`, ...(cpu ? { cpu } : {}) };
+  return { requests: { ...both }, limits: { ...both } };
 }
 
 /** Parse a JVM heap string ("1536m", "4g") into MiB. */
