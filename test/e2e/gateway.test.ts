@@ -56,7 +56,8 @@ describe('E2E: read-only gateway', { skip: SKIP_REASON, timeout: 300_000 }, () =
     gateway = await startGateway(loadConfig({
       GATEWAY_UPSTREAM_URL: `http://127.0.0.1:${DAEMON_PORT}`,
       GATEWAY_PORT: '0',
-      GATEWAY_PROGRAM: program,
+      GATEWAY_PROGRAM_WIN: program,
+      GATEWAY_PROGRAM_MAC: getTestProgramPath('call_graph'),
       GATEWAY_ISOLATION_CHECK_MS: '300',
       GATEWAY_ALLOW_ANONYMOUS: '1',
       GATEWAY_SESSION_READY_TIMEOUT_MS: '180000',
@@ -92,6 +93,15 @@ describe('E2E: read-only gateway', { skip: SKIP_REASON, timeout: 300_000 }, () =
     assert.ok(names.some((n) => /main/.test(n)), `main not in ${names.join(', ')}`);
   });
 
+  it('serves the second program by its public name', async () => {
+    const res = await client.callTool({ name: 'list_functions', arguments: { limit: 500, program: 'mac' } });
+    assert.ok(!res.isError, (res.content as TextContent)[0]?.text);
+    const body = JSON.parse((res.content as TextContent)[0].text) as { functions?: Array<{ name: string }> };
+    const names = (body.functions ?? []).map((f) => f.name);
+    assert.ok(names.some((n) => /leaf_function/.test(n)), `leaf_function not in ${names.join(', ')}`);
+    assert.ok(!names.some((n) => /multiply_numbers/.test(n)), 'the mac session reads another program than win');
+  });
+
   it('runs decompile', async () => {
     const res = await client.callTool({ name: 'decompile', arguments: { name: 'main' } });
     const text = (res.content as TextContent)[0].text;
@@ -106,7 +116,7 @@ describe('E2E: read-only gateway', { skip: SKIP_REASON, timeout: 300_000 }, () =
       arguments: { address: '0x100000000', comment: 'gateway e2e', type: 'plate' },
     });
     assert.strictEqual(res.isError, true);
-    assert.match((res.content as TextContent)[0].text, /not available on this read-only gateway/);
+    assert.match((res.content as TextContent)[0].text, /not available on this read-only server/);
     const comments = await client.callTool({ name: 'list_comments', arguments: {} });
     assert.ok(!(comments.content as TextContent)[0].text.includes('gateway e2e'));
   });
@@ -164,10 +174,10 @@ describe('E2E: read-only gateway', { skip: SKIP_REASON, timeout: 300_000 }, () =
       while (Date.now() < deadline) {
         const res = await client.callTool({ name: 'get_program_info', arguments: {} });
         text = (res.content as TextContent)[0].text;
-        if (res.isError && /no longer isolated/.test(text)) break;
+        if (res.isError && /not serving/.test(text)) break;
         await new Promise((r) => setTimeout(r, 200));
       }
-      assert.match(text, /no longer isolated/);
+      assert.match(text, /not serving/);
       const health = await fetch(`http://127.0.0.1:${gateway.port}/health`);
       assert.strictEqual(health.status, 503);
     } finally {

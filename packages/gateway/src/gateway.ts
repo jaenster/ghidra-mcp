@@ -1,10 +1,13 @@
 /**
  * The gateway's call path, independent of HTTP: allowlist and argument check,
- * quota, forward on the pinned session, scrub and cap the output, audit.
+ * quota, forward on the pinned session of the chosen program, strip, scrub,
+ * redact and cap the output, audit.
  */
 
 import { formatResponse } from '@ghidra-mcp/mcp';
-import { EXPOSED_TOOLS } from './allowlist.js';
+import { DENIED_RESPONSE_KEYS, EXPOSED_TOOLS, type PublicProgram } from './allowlist.js';
+import { stripResponseKeys } from './public-tools.js';
+import { Redactor } from './redact.js';
 import type { AuditLog, Outcome } from './audit.js';
 import type { Identity } from './auth.js';
 import type { QuotaManager } from './quota.js';
@@ -23,14 +26,22 @@ export type CallResult = {
   isError?: boolean;
 };
 
-type Format = 'toon' | 'json';
+export type Format = 'toon' | 'json';
+
+export interface CallOptions {
+  /** Output format chosen by the caller elsewhere (the edge); overrides set_output_format. */
+  format?: Format;
+}
+
+export type ProgramSessions = Readonly<Record<PublicProgram, PinnedSession>>;
 
 export class Gateway {
   private readonly tools: PublicTool[] = buildPublicTools();
   private readonly formats = new Map<string, Format>();
+  private readonly redactor = new Redactor();
 
   constructor(
-    private readonly session: PinnedSession,
+    private readonly sessions: ProgramSessions,
     private readonly quota: QuotaManager,
     private readonly audit: AuditLog,
     private readonly options: GatewayOptions,
@@ -40,24 +51,28 @@ export class Gateway {
     return this.tools;
   }
 
-  async callTool(identity: Identity, name: unknown, args: unknown): Promise<CallResult> {
+  async callTool(identity: Identity, name: unknown, args: unknown, callOptions: CallOptions = {}): Promise<CallResult> {
     const started = performance.now();
     const toolName = typeof name === 'string' ? name : String(name);
+    let program: PublicProgram | undefined;
+    let redactions = 0;
     const finish = (result: CallResult, outcome: Outcome, reason?: string, truncated?: boolean): CallResult => {
       this.audit.record({
         identity,
         tool: toolName,
+        program,
         args,
         durationMs: performance.now() - started,
         bytes: Buffer.byteLength(result.content.map((c) => c.text).join('')),
         outcome,
         reason,
         truncated,
+        redactions,
       });
       return result;
     };
 
-    let call: { name: string; args: Record<string, unknown> };
+    let call: ReturnType<typeof checkCall>;
     try {
       call = checkCall(name, args);
     } catch (err) {
@@ -74,11 +89,12 @@ export class Gateway {
       return finish(textResult(`Output format set to: ${format}`), 'ok');
     }
 
+    program = call.program;
     const tier = EXPOSED_TOOLS[call.name].tier;
     const decision = this.quota.acquire(identity.key, tier);
     if (!decision.ok) {
       const what = decision.reason === 'busy'
-        ? 'The gateway is busy with other costly calls'
+        ? 'The server is busy with other costly calls'
         : decision.reason === 'costly_rate_limited'
           ? `Rate limit reached for costly tools (${call.name})`
           : 'Rate limit reached';
@@ -86,42 +102,56 @@ export class Gateway {
     }
 
     try {
+      const session = this.sessions[call.program];
       const timeout = tier === 'costly' ? this.options.costlyTimeoutMs : this.options.cheapTimeoutMs;
-      const res = await this.session.call(call.name, call.args, timeout);
-      const text = this.scrub(res.isError ? res.text : this.reformat(res.text, identity.key));
-      const { text: capped, truncated } = capBytes(text, this.options.maxResponseBytes);
-      return finish(
-        res.isError ? errorResult(capped) : textResult(capped),
-        res.isError ? 'error' : 'ok',
-        undefined,
-        truncated,
-      );
+      const res = await session.call(call.name, call.args, timeout);
+      if (res.isError) {
+        // Daemon error text names sessions, paths and internals; the caller gets its class only.
+        return finish(errorResult(publicError(res.text)), 'error', errorClass(res.text));
+      }
+      const format = callOptions.format ?? this.formats.get(identity.key) ?? 'toon';
+      const shaped = this.shape(call.name, res.text, format, session.id);
+      const redacted = this.redactor.redact(shaped);
+      redactions = redacted.count;
+      const { text: capped, truncated } = capBytes(redacted.text, this.options.maxResponseBytes);
+      return finish(textResult(capped), 'ok', undefined, truncated);
     } catch (err) {
-      if (err instanceof UpstreamError) return finish(errorResult(err.message), 'upstream_error');
+      if (err instanceof UpstreamError) return finish(errorResult(err.publicMessage), 'upstream_error', err.message);
       throw err;
     } finally {
       decision.release();
     }
   }
 
-  /** The daemon answers in JSON; re-encode in the caller's format. */
-  private reformat(text: string, identityKey: string): string {
-    const format = this.formats.get(identityKey) ?? 'toon';
-    let data: unknown;
+  /** The daemon answers in JSON: drop what describes the server, re-encode, scrub what is left. */
+  private shape(toolName: string, text: string, format: Format, sessionId: string | null): string {
+    let out: string;
     try {
-      data = JSON.parse(text);
+      out = formatResponse(stripResponseKeys(toolName, JSON.parse(text), DENIED_RESPONSE_KEYS), format);
     } catch {
-      return text;
+      out = text;
     }
-    return formatResponse(data, format);
-  }
-
-  /** Remove what identifies the daemon's side: the pinned session id and server URLs. */
-  private scrub(text: string): string {
-    let out = text.replace(/ghidra:\/\/[^\s"',)]+/g, 'ghidra://<server>');
-    const sid = this.session.id;
-    if (sid) out = out.split(sid).join('<session>');
+    out = out.replace(/ghidra:\/\/[^\s"',)]+/g, '[redacted]');
+    if (sessionId) out = out.split(sessionId).join('[redacted]');
     return out;
+  }
+}
+
+/** The class of a daemon error, for the audit line. */
+function errorClass(text: string): string {
+  if (/not found|no such|does not exist|no function|unknown (function|symbol|address|data type)/i.test(text)) return 'not_found';
+  if (/timed? ?out|timeout/i.test(text)) return 'timeout';
+  if (/invalid|must be|cannot parse|could not parse|malformed|out of range|required|expected/i.test(text)) return 'invalid';
+  return 'failed';
+}
+
+/** A message that says what kind of failure happened and nothing about the daemon. */
+export function publicError(daemonText: string): string {
+  switch (errorClass(daemonText)) {
+    case 'not_found': return 'Not found in this program.';
+    case 'timeout': return 'The call took too long; narrow it and try again.';
+    case 'invalid': return 'Invalid arguments for this tool.';
+    default: return 'The call failed.';
   }
 }
 
@@ -138,7 +168,7 @@ export function capBytes(text: string, maxBytes: number): { text: string; trunca
   const total = Buffer.byteLength(text);
   if (total <= maxBytes) return { text, truncated: false };
   const marker = (shown: number) =>
-    `\n[gateway: response truncated, ${shown} of ${total} bytes shown; narrow the query (limit/offset, filter, fewer items)]`;
+    `\n[truncated: ${shown} of ${total} bytes shown; narrow the query (limit/offset, filter, fewer items)]`;
   const budget = Math.max(0, maxBytes - Buffer.byteLength(marker(maxBytes)));
   const buf = Buffer.from(text);
   let end = budget;

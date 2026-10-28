@@ -5,6 +5,7 @@
  */
 
 import type { ToolTier } from './allowlist.js';
+import { TokenBucket as Bucket } from './token-bucket.js';
 
 export interface QuotaOptions {
   callsPerMinute: number;
@@ -16,40 +17,6 @@ export interface QuotaOptions {
 export type QuotaDecision =
   | { ok: true; release: () => void }
   | { ok: false; reason: 'rate_limited' | 'costly_rate_limited' | 'busy'; retryAfterSeconds: number };
-
-class Bucket {
-  private tokens: number;
-  private last: number;
-
-  constructor(private readonly perMinute: number, now: number) {
-    this.tokens = perMinute;
-    this.last = now;
-  }
-
-  private refill(now: number): void {
-    const elapsed = Math.max(0, now - this.last);
-    this.tokens = Math.min(this.perMinute, this.tokens + (elapsed * this.perMinute) / 60_000);
-    this.last = now;
-  }
-
-  has(now: number): boolean {
-    this.refill(now);
-    return this.tokens >= 1;
-  }
-
-  take(): void {
-    this.tokens -= 1;
-  }
-
-  secondsUntilNext(): number {
-    return Math.max(1, Math.ceil(((1 - this.tokens) * 60) / this.perMinute));
-  }
-
-  full(now: number): boolean {
-    this.refill(now);
-    return this.tokens >= this.perMinute;
-  }
-}
 
 export class QuotaManager {
   private readonly calls = new Map<string, Bucket>();

@@ -22,13 +22,24 @@ export interface ExposedTool {
   clamp?: Readonly<Record<string, { max: number; default?: number }>>;
   /** Array arguments refused when longer than this. */
   maxItems?: Readonly<Record<string, number>>;
+  /**
+   * When set, only these top-level keys of the tool's JSON answer reach the
+   * caller. For tools whose answer describes where the program lives rather
+   * than what is in it.
+   */
+  keepKeys?: readonly string[];
 }
 
 const PAGE = { limit: { max: 500 } } as const;
 
 export const EXPOSED_TOOLS: Readonly<Record<string, ExposedTool>> = {
   // Program and function metadata.
-  get_program_info: { tier: 'cheap' },
+  // path is the import path on the importer's disk; version fields describe the server.
+  get_program_info: {
+    tier: 'cheap',
+    keepKeys: ['name', 'format', 'languageId', 'compiler', 'imageBase', 'minAddress', 'maxAddress',
+      'endianness', 'pointerSize'],
+  },
   list_functions: { tier: 'cheap', clamp: PAGE },
   get_function_info: { tier: 'cheap' },
   get_function_summary: { tier: 'cheap', clamp: { maxCalls: { max: 200 }, maxCallers: { max: 200 } } },
@@ -86,8 +97,35 @@ export const EXPOSED_TOOLS: Readonly<Record<string, ExposedTool>> = {
  */
 export const PINNING_ARGS: readonly string[] = [
   'sessionId', 'session', 'alias', 'winSession', 'macSession', 'sourceSession', 'targetSession',
-  'path', 'program', 'programPath', 'binaryPath', 'repo', 'folder', 'filePath', 'archivePath',
+  'path', 'programPath', 'binaryPath', 'repo', 'folder', 'filePath', 'archivePath',
   'projectJsonPath', 'sourceProgramPath', 'destProgramPath', 'workerId',
+];
+
+/**
+ * The programs the public surface serves, by name. Callers pick one of these
+ * names; which server path each name opens lives in the origin's configuration
+ * and never in a request.
+ */
+export const PUBLIC_PROGRAMS = ['win', 'mac'] as const;
+export type PublicProgram = typeof PUBLIC_PROGRAMS[number];
+export const DEFAULT_PROGRAM: PublicProgram = 'win';
+/** The one argument that selects a program, and only from PUBLIC_PROGRAMS. */
+export const PROGRAM_ARG = 'program';
+
+export function isPublicProgram(v: unknown): v is PublicProgram {
+  return typeof v === 'string' && (PUBLIC_PROGRAMS as readonly string[]).includes(v);
+}
+
+/**
+ * Keys removed from every JSON answer, at any depth: they name sessions,
+ * workers, files on the server or on someone's disk, server hosts and users,
+ * or the server's version bookkeeping.
+ */
+export const DENIED_RESPONSE_KEYS: readonly string[] = [
+  'sessionId', 'workerId', 'pid', 'host', 'user', 'owner', 'repo', 'folder', 'project',
+  'programPath', 'binaryPath', 'projectPath', 'archivePath', 'localPath', 'url', 'executablePath', 'fsrl',
+  'sourceProgram', 'sourcePath', 'destProgram', 'destPath', 'checkoutId', 'checkoutType', 'checkedOut',
+  'version', 'latestVersion', 'versionLoadedAt', 'lastCleanVersion', 'cacheVersion', 'changeSeq',
 ];
 
 /**

@@ -1,7 +1,10 @@
 /**
  * HTTP surface: MCP over Streamable HTTP at /mcp (stateless, one MCP server per
- * request) and /health. Every /mcp request is authenticated before the MCP
- * layer sees it.
+ * request), a bare /health, and /internal/* for the edge. Every /mcp request is
+ * authenticated before the MCP layer sees it.
+ *
+ * Nothing here answers with daemon detail: /health says ok or not, and the
+ * versions and their age are only on /internal/*, behind the service token.
  */
 
 import * as http from 'node:http';
@@ -10,18 +13,33 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
 import type { AuditLog } from './audit.js';
-import { AuthError, hashToken, type Authenticator, type Identity } from './auth.js';
-import type { Gateway } from './gateway.js';
+import type { PublicProgram } from './allowlist.js';
+import {
+  AuthError, edgeIdentity, hashToken, hasServiceToken, type Authenticator, type Identity,
+} from './auth.js';
+import type { AuthMode } from './config.js';
+import type { Format, Gateway } from './gateway.js';
+import type { ServedVersion } from './upstream.js';
+
+export interface GatewayStatus {
+  serving: boolean;
+  programs: Record<PublicProgram, ServedVersion | null>;
+}
 
 export interface HttpServerOptions {
   gateway: Gateway;
   auth: Authenticator;
   audit: AuditLog;
   maxBodyBytes: number;
-  isHealthy?: () => boolean;
+  authMode?: AuthMode;
+  /** When set, every request but /health must carry this Access service token. */
+  accessToken?: { clientId: string; clientSecret: string };
+  status?: () => GatewayStatus;
 }
 
-function createMcpServer(gateway: Gateway): Server {
+export const OUTPUT_FORMAT_HEADER = 'x-output-format';
+
+function createMcpServer(gateway: Gateway, format: Format | undefined): Server {
   const server = new Server(
     { name: 'ghidra-mcp-gateway', version: '1.0.0' },
     { capabilities: { tools: {} } },
@@ -30,7 +48,7 @@ function createMcpServer(gateway: Gateway): Server {
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const identity = extra.authInfo?.extra?.identity as Identity | undefined;
     if (!identity) throw new Error('unauthenticated');
-    return gateway.callTool(identity, request.params.name, request.params.arguments);
+    return gateway.callTool(identity, request.params.name, request.params.arguments, { format });
   });
   return server;
 }
@@ -66,15 +84,55 @@ function readBody(req: http.IncomingMessage, limit: number): Promise<unknown> {
 
 export function createHttpServer(options: HttpServerOptions): http.Server {
   const { gateway, auth, audit, maxBodyBytes } = options;
+  const authMode = options.authMode ?? 'github';
+  const statusOf = options.status ?? (() => ({ serving: true, programs: { win: null, mac: null } }));
 
   return http.createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://gateway');
 
     if (url.pathname === '/health' && req.method === 'GET') {
-      const healthy = options.isHealthy?.() ?? true;
-      sendJson(res, healthy ? 200 : 503, { status: healthy ? 'ok' : 'not isolated' });
+      const healthy = statusOf().serving;
+      sendJson(res, healthy ? 200 : 503, { status: healthy ? 'ok' : 'unavailable' });
       return;
     }
+
+    if (options.accessToken
+      && !hasServiceToken(req.headers, options.accessToken.clientId, options.accessToken.clientSecret)) {
+      audit.record({
+        identity: null, tool: '-', args: {}, durationMs: 0, bytes: 0,
+        outcome: 'unauthenticated', reason: 'service_token',
+      });
+      sendJson(res, 403, { error: 'Forbidden' });
+      return;
+    }
+
+    if (url.pathname.startsWith('/internal/')) {
+      if (req.method !== 'GET' || !options.accessToken) {
+        sendJson(res, 404, { error: 'Not found' });
+        return;
+      }
+      const s = statusOf();
+      if (url.pathname === '/internal/versions') {
+        sendJson(res, 200, {
+          win: s.programs.win?.version ?? null,
+          mac: s.programs.mac?.version ?? null,
+        });
+        return;
+      }
+      if (url.pathname === '/internal/health') {
+        const now = Date.now();
+        const describe = (v: ServedVersion | null) =>
+          v ? { version: v.version, ageSeconds: Math.round((now - v.since) / 1000) } : null;
+        sendJson(res, s.serving ? 200 : 503, {
+          status: s.serving ? 'ok' : 'unavailable',
+          programs: { win: describe(s.programs.win), mac: describe(s.programs.mac) },
+        });
+        return;
+      }
+      sendJson(res, 404, { error: 'Not found' });
+      return;
+    }
+
     if (url.pathname !== '/mcp') {
       sendJson(res, 404, { error: 'Not found' });
       return;
@@ -88,7 +146,14 @@ export function createHttpServer(options: HttpServerOptions): http.Server {
     let identity: Identity;
     const authorization = req.headers.authorization;
     try {
-      identity = await auth.authenticate(authorization, req.socket.remoteAddress ?? 'unknown');
+      if (authMode === 'edge') {
+        // The service token was checked above; only now is the edge's word taken.
+        const vouched = edgeIdentity(req.headers);
+        if (!vouched) throw new AuthError('A signed-in caller is required.', 401);
+        identity = vouched;
+      } else {
+        identity = await auth.authenticate(authorization, req.socket.remoteAddress ?? 'unknown');
+      }
     } catch (err) {
       if (err instanceof AuthError) {
         audit.record({
@@ -112,13 +177,16 @@ export function createHttpServer(options: HttpServerOptions): http.Server {
       return;
     }
 
+    const rawFormat = req.headers[OUTPUT_FORMAT_HEADER];
+    const format: Format | undefined = rawFormat === 'json' || rawFormat === 'toon' ? rawFormat : undefined;
+
     const authInfo: AuthInfo = {
       token: authorization ? hashToken(authorization) : '',
       clientId: identity.key,
       scopes: [],
       extra: { identity },
     };
-    const server = createMcpServer(gateway);
+    const server = createMcpServer(gateway, format);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     res.on('close', () => {
       void transport.close();

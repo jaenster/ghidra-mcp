@@ -5,6 +5,7 @@ import {
   EXPOSED_TOOLS,
   GATEWAY_LOCAL_TOOLS,
   PINNING_ARGS,
+  DENIED_RESPONSE_KEYS,
 } from '../src/allowlist.js';
 import { RefusedError, buildPublicTools, checkCall } from '../src/tools.js';
 
@@ -43,6 +44,11 @@ describe('allowlist', () => {
     }
   });
 
+  it('keeps only binary facts from get_program_info', () => {
+    expect(EXPOSED_TOOLS.get_program_info.keepKeys).not.toContain('path');
+    expect(DENIED_RESPONSE_KEYS).toEqual(expect.arrayContaining(['sessionId', 'programPath', 'version', 'latestVersion']));
+  });
+
   it('strips pinning arguments from every public schema', () => {
     for (const t of buildPublicTools()) {
       for (const arg of PINNING_ARGS) expect(t.inputSchema.properties).not.toHaveProperty(arg);
@@ -75,7 +81,7 @@ describe('argument checks', () => {
   });
 
   it('rejects an injected path, program or repo', () => {
-    for (const key of ['path', 'program', 'binaryPath', 'repo', 'programPath']) {
+    for (const key of ['path', 'binaryPath', 'repo', 'programPath', 'folder']) {
       expect(refusal(() => checkCall('list_functions', { [key]: '/windows/secret/Game.exe' })).reason)
         .toBe('pinning_arg');
     }
@@ -101,6 +107,20 @@ describe('argument checks', () => {
   });
 
   it('passes a well-formed read through unchanged', () => {
-    expect(checkCall('decompile', { name: 'main' })).toEqual({ name: 'decompile', args: { name: 'main' } });
+    expect(checkCall('decompile', { name: 'main' })).toEqual({ name: 'decompile', program: 'win', args: { name: 'main' } });
+  });
+
+  it('takes the program only as a public name and never forwards it', () => {
+    expect(checkCall('decompile', { name: 'main', program: 'mac' })).toEqual({ name: 'decompile', program: 'mac', args: { name: 'main' } });
+    for (const program of ['Diablo2Lod/windows/lod/1.14d/Game.exe', '/windows/d2r/Game.exe', 'MAC', '', null, 2]) {
+      expect(refusal(() => checkCall('decompile', { name: 'main', program })).reason).toBe('pinning_arg');
+    }
+  });
+
+  it('offers the program choice on every forwarded tool, as an enum', () => {
+    for (const t of buildPublicTools()) {
+      if (t.name === 'set_output_format') continue;
+      expect(t.inputSchema.properties.program).toMatchObject({ enum: ['win', 'mac'], default: 'win' });
+    }
   });
 });

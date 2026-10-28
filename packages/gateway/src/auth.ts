@@ -5,7 +5,7 @@
  * Tokens are never stored or logged; the cache is keyed by their SHA-256.
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 
 export interface Identity {
   /** Stable key for quotas and the audit log: "gh:<numeric id>" or "anon:<address>". */
@@ -115,4 +115,55 @@ function parseBearer(header: string | undefined): string | null {
   if (!header) return null;
   const m = /^Bearer\s+(\S+)\s*$/i.exec(header);
   return m ? m[1] : null;
+}
+
+/** The headers a Cloudflare Access service token travels in. */
+export const ACCESS_CLIENT_ID_HEADER = 'cf-access-client-id';
+export const ACCESS_CLIENT_SECRET_HEADER = 'cf-access-client-secret';
+/** The caller the edge signed in, sent by the edge only. */
+export const EDGE_IDENTITY_HEADER = 'x-edge-identity';
+export const EDGE_LOGIN_HEADER = 'x-edge-login';
+
+type HeaderBag = Record<string, string | string[] | undefined>;
+
+function header(headers: HeaderBag, name: string): string | undefined {
+  const v = headers[name];
+  return Array.isArray(v) ? undefined : v;
+}
+
+/** Compare two secrets in time independent of where they differ. */
+function sameSecret(a: string, b: string): boolean {
+  const da = createHash('sha256').update(a).digest();
+  const db = createHash('sha256').update(b).digest();
+  return timingSafeEqual(da, db);
+}
+
+/**
+ * Whether a request carries the configured Access service token. Both halves
+ * must match; a request repeating either header is refused.
+ */
+export function hasServiceToken(headers: HeaderBag, clientId: string, clientSecret: string): boolean {
+  const id = header(headers, ACCESS_CLIENT_ID_HEADER);
+  const secret = header(headers, ACCESS_CLIENT_SECRET_HEADER);
+  if (id === undefined || secret === undefined) return false;
+  // Evaluate both so the time taken does not say which half was wrong.
+  const idOk = sameSecret(id, clientId);
+  const secretOk = sameSecret(secret, clientSecret);
+  return idOk && secretOk;
+}
+
+const LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
+
+/**
+ * The identity the edge vouches for. Only meaningful after hasServiceToken
+ * passed: anyone can send these headers, only the edge can send them with the
+ * token.
+ */
+export function edgeIdentity(headers: HeaderBag): Identity | null {
+  const key = header(headers, EDGE_IDENTITY_HEADER);
+  const login = header(headers, EDGE_LOGIN_HEADER);
+  const m = key ? /^gh:([1-9][0-9]{0,15})$/.exec(key) : null;
+  if (!m || !login || !LOGIN.test(login)) return null;
+  const githubId = Number(m[1]);
+  return { key: `gh:${githubId}`, githubId, login };
 }

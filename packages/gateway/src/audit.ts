@@ -11,12 +11,16 @@ export type Outcome = 'ok' | 'error' | 'refused' | 'rate_limited' | 'unauthentic
 export interface AuditRecord {
   identity: Identity | null;
   tool: string;
+  /** Public program name the call read, once it passed the argument check. */
+  program?: string;
   args: unknown;
   durationMs: number;
   bytes: number;
   outcome: Outcome;
   reason?: string;
   truncated?: boolean;
+  /** Redactions made in the answer. */
+  redactions?: number;
 }
 
 export type AuditSink = (line: string) => void;
@@ -44,12 +48,14 @@ export class AuditLog {
       githubId: r.identity?.githubId ?? null,
       login: r.identity?.login ?? null,
       tool: r.tool,
+      ...(r.program ? { program: r.program } : {}),
       argsHash: hashArgs(r.args),
       durationMs: Math.round(r.durationMs),
       bytes: r.bytes,
       outcome: r.outcome,
       ...(r.reason ? { reason: r.reason } : {}),
       ...(r.truncated ? { truncated: true } : {}),
+      ...(r.redactions ? { redactions: r.redactions } : {}),
     }));
   }
 }

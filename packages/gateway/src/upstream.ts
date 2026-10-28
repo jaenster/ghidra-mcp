@@ -13,8 +13,12 @@ export interface Upstream {
   call(name: string, args: Record<string, unknown>, timeoutMs: number): Promise<UpstreamResult>;
 }
 
+/**
+ * A failure on the daemon side. The message is for the operator's log and may
+ * carry daemon text; callers only ever see publicMessage.
+ */
 export class UpstreamError extends Error {
-  constructor(message: string) {
+  constructor(message: string, readonly publicMessage = 'The analysis backend is unavailable; try again later.') {
     super(message);
     this.name = 'UpstreamError';
   }
@@ -44,14 +48,16 @@ export class HttpUpstream implements Upstream {
       });
     } catch (err) {
       const timedOut = err instanceof Error && err.name === 'TimeoutError';
-      throw new UpstreamError(timedOut ? 'The analysis backend timed out.' : 'The analysis backend is unreachable.');
+      throw timedOut
+        ? new UpstreamError('daemon call timed out', 'The call took too long; narrow it and try again.')
+        : new UpstreamError('daemon unreachable');
     }
-    if (res.status !== 200) throw new UpstreamError(`The analysis backend answered HTTP ${res.status}.`);
+    if (res.status !== 200) throw new UpstreamError(`daemon answered HTTP ${res.status}`);
     const body = await res.json() as {
       result?: { content?: Array<{ type: string; text?: string }> };
       error?: { message?: string };
     };
-    if (body.error) throw new UpstreamError('The analysis backend refused the request.');
+    if (body.error) throw new UpstreamError(`daemon protocol error: ${body.error.message ?? ''}`);
     const text = (body.result?.content ?? []).map((c) => c.text ?? '').join('\n');
     return { text, isError: text.startsWith('Error:') };
   }
@@ -69,6 +75,11 @@ export interface PinnedSessionOptions {
    * dedups onto whatever session already has the program open - writable included.
    */
   requireDedicatedUpstream: boolean;
+  /**
+   * Sessions the gateway itself holds for its other programs. They count as
+   * the gateway's own in the isolation checks.
+   */
+  siblings?: () => readonly string[];
 }
 
 interface SessionRow {
@@ -80,6 +91,14 @@ interface SessionRow {
 
 const SESSION_GONE = /^Error: (Session not found|No session specified)/;
 
+/** The server version a session serves, as its worker reports it. */
+export interface ServedVersion {
+  /** Server version number; null for a program that is not on a server (a local project). */
+  version: number | null;
+  /** When that version started being served (epoch ms). */
+  since: number;
+}
+
 /**
  * Owns the one read-only session. Opened lazily, re-opened if the daemon loses
  * it, and never offered to callers: they cannot name it, list it or close it.
@@ -89,15 +108,40 @@ export class PinnedSession {
   private opening: Promise<string> | null = null;
   /** Set when the isolation check fails; every later call is refused until restart. */
   private broken: string | null = null;
+  private served: ServedVersion | null = null;
 
   constructor(private readonly upstream: Upstream, private readonly options: PinnedSessionOptions) {}
+
+  /** The version last read from the worker, or null before the first read. */
+  get servedVersion(): ServedVersion | null {
+    return this.served;
+  }
+
+  /**
+   * Ask the worker which server version it serves. A worker in version-follow
+   * mode reloads by itself, so this changes without the session changing.
+   */
+  async refreshVersion(): Promise<ServedVersion> {
+    const sid = await this.open();
+    const res = await this.upstream.call('get_program_info', { sessionId: sid }, 30_000);
+    if (res.isError) throw new UpstreamError(`get_program_info failed: ${res.text}`);
+    const info = JSON.parse(res.text) as { version?: unknown; versionLoadedAt?: unknown };
+    const version = typeof info.version === 'number' ? info.version : null;
+    const loadedAt = typeof info.versionLoadedAt === 'number' ? info.versionLoadedAt : null;
+    if (!this.served || this.served.version !== version) {
+      this.served = { version, since: loadedAt ?? Date.now() };
+    } else if (loadedAt !== null) {
+      this.served = { version, since: loadedAt };
+    }
+    return this.served;
+  }
 
   get id(): string | null {
     return this.sessionId;
   }
 
   async open(): Promise<string> {
-    if (this.broken) throw new UpstreamError('The gateway is not serving: its backend is no longer isolated.');
+    if (this.broken) throw new UpstreamError('not serving: the backend is no longer isolated', 'This server is not serving right now.');
     if (this.sessionId) return this.sessionId;
     if (!this.opening) {
       this.opening = this.doOpen().finally(() => {
@@ -131,7 +175,8 @@ export class PinnedSession {
    */
   async verifyIsolation(): Promise<boolean> {
     if (!this.options.requireDedicatedUpstream || this.broken) return !this.broken;
-    const rows = (await this.listSessions()).filter((s) => !s.repoSession);
+    const siblings = new Set(this.options.siblings?.() ?? []);
+    const rows = (await this.listSessions()).filter((s) => !s.repoSession && !siblings.has(s.id));
     const foreign = rows.filter((s) => s.id !== this.sessionId);
     const shared = rows.find((s) => s.id === this.sessionId && (s.clientCount ?? 1) > 1);
     if (foreign.length > 0 || shared) {
@@ -149,7 +194,9 @@ export class PinnedSession {
   }
 
   private async doOpen(): Promise<string> {
-    const before = (await this.listSessions()).filter((s) => !s.repoSession);
+    const siblings = new Set(this.options.siblings?.() ?? []);
+    const all = (await this.listSessions()).filter((s) => !s.repoSession);
+    const before = all.filter((s) => !siblings.has(s.id));
     if (this.options.requireDedicatedUpstream && before.length > 0) {
       throw new UpstreamError(
         `The daemon already holds ${before.length} session(s) the gateway did not open; ` +
@@ -167,7 +214,7 @@ export class PinnedSession {
     // create_session hands back an existing session for the same program, writable
     // or not, and that session carries its holders' uncommitted edits. Only a
     // session this call created is acceptable.
-    if (before.some((s) => s.id === session.id) || (session.clientCount ?? 1) > 1) {
+    if (all.some((s) => s.id === session.id) || (session.clientCount ?? 1) > 1) {
       throw new UpstreamError('The daemon returned an existing session instead of a fresh one; refusing to share it.');
     }
     await this.waitReady(session.id);
