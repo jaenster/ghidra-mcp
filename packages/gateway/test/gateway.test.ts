@@ -11,7 +11,9 @@ import { QuotaManager } from '../src/quota.js';
 import { startGateway } from '../src/index.js';
 import { DEFAULT_PROGRAMS, loadConfig } from '../src/config.js';
 import type { JwksFetch } from '../src/access-jwt.js';
-import { PinnedSession, type Upstream, type UpstreamResult } from '../src/upstream.js';
+import {
+  PinnedSession, UpstreamError, type Upstream, type UpstreamHealth, type UpstreamResult,
+} from '../src/upstream.js';
 
 const ALICE: Identity = { key: 'gh:1', githubId: 1, login: 'alice' };
 const BOB: Identity = { key: 'gh:2', githubId: 2, login: 'bob' };
@@ -45,7 +47,21 @@ class FakeUpstream implements Upstream {
   respond: (name: string, args: Record<string, unknown>) => unknown = (name) => ({ tool: name });
   /** When set, the next tool call fails with this daemon text. */
   failWith: string | null = null;
-  sessions: Array<{ id: string; status: string; clientCount?: number; program?: string }> = [];
+  sessions: Array<{ id: string; status: string; clientCount?: number; program?: string; repoSession?: boolean }> = [];
+  /** /health answers "unreachable" this many more times, as a daemon that is still starting. */
+  downFor = 0;
+  healthChecks = 0;
+
+  /** Like the daemon: one worker per session. */
+  async health(): Promise<UpstreamHealth> {
+    this.healthChecks++;
+    if (this.downFor > 0) {
+      this.downFor--;
+      throw new UpstreamError('daemon unreachable');
+    }
+    return { sessions: this.sessions.length, workers: this.sessions.length };
+  }
+
   versions: Record<string, number> = { [WIN_PATH]: 1757, [MAC_PATH]: 312 };
   /** Answer create_session the way the daemon's dedup does: with an existing session. */
   dedupTo: { id: string; status: string; clientCount: number } | null = null;
@@ -53,6 +69,12 @@ class FakeUpstream implements Upstream {
   async call(name: string, args: Record<string, unknown>): Promise<UpstreamResult> {
     this.calls.push({ name, args });
     if (name === 'list_sessions') return { text: JSON.stringify(this.sessions), isError: false };
+    if (name === 'close_session') {
+      const at = this.sessions.findIndex((s) => s.id === args.sessionId);
+      if (at < 0) return { text: `Error: Session not found: ${String(args.sessionId)}`, isError: true };
+      this.sessions.splice(at, 1);
+      return { text: JSON.stringify({ closed: true, sessionId: args.sessionId, clientCount: 0 }), isError: false };
+    }
     if (name === 'create_session') {
       if (this.dedupTo) return { text: JSON.stringify(this.dedupTo), isError: false };
       const program = String(args.program ?? args.binaryPath);
@@ -115,6 +137,93 @@ describe('configuration', () => {
       GATEWAY_ACCESS_CLIENT_SECRET: 'b', GATEWAY_ALLOW_ANONYMOUS: '1',
     })).toThrow(/ANONYMOUS/);
     expect(() => loadConfig({ GATEWAY_UPSTREAM_URL: 'http://x', GATEWAY_ACCESS_CLIENT_ID: 'a' })).toThrow(/together/);
+  });
+});
+
+describe('startup against its daemon', () => {
+  const PRIVATE = { GATEWAY_UPSTREAM_URL: 'http://127.0.0.1:8432', GATEWAY_PORT: '0', GATEWAY_ALLOW_ANONYMOUS: '1' };
+  const noSleep = async () => {};
+
+  it('waits for a daemon that is not listening yet, then opens both programs', async () => {
+    const upstream = new FakeUpstream();
+    upstream.downFor = 5;
+    const log: string[] = [];
+    const running = await startGateway(loadConfig(PRIVATE), { upstream, sleep: noSleep, log: (l) => log.push(l) });
+    try {
+      expect(upstream.healthChecks).toBe(6);
+      expect(log[0]).toMatch(/waiting for the daemon/);
+      expect(upstream.sessions.map((s) => s.id).sort()).toEqual(Object.values(SESSION_IDS).sort());
+    } finally {
+      await running.close();
+    }
+  });
+
+  it('gives up on a daemon that never answers', async () => {
+    const upstream = new FakeUpstream();
+    upstream.downFor = Infinity;
+    await expect(startGateway(loadConfig({ ...PRIVATE, GATEWAY_UPSTREAM_WAIT_MS: '0' }), { upstream, log: () => {} }))
+      .rejects.toThrow(/not reachable/);
+    expect(upstream.calls.filter((c) => c.name === 'create_session')).toEqual([]);
+  });
+
+  it('after a restart closes what the previous process left and ends with one session per program', async () => {
+    const upstream = new FakeUpstream();
+    // An earlier gateway process: its two pinned sessions and the repository session.
+    upstream.sessions.push(
+      { id: 'aaaaaaaa-0000-4000-8000-000000000001', status: 'ready', program: WIN_PATH },
+      { id: 'aaaaaaaa-0000-4000-8000-000000000002', status: 'ready', program: MAC_PATH },
+      { id: 'aaaaaaaa-0000-4000-8000-000000000003', status: 'ready', repoSession: true },
+    );
+    const running = await startGateway(loadConfig({ ...PRIVATE, GATEWAY_RECLAIM_SESSIONS: '1' }), { upstream, log: () => {} });
+    try {
+      const closed = upstream.calls.filter((c) => c.name === 'close_session').map((c) => c.args);
+      expect(closed).toEqual([1, 2, 3].map((n) => ({ sessionId: `aaaaaaaa-0000-4000-8000-00000000000${n}`, force: true })));
+      const firstCreate = upstream.calls.findIndex((c) => c.name === 'create_session');
+      const lastClose = upstream.calls.map((c) => c.name).lastIndexOf('close_session');
+      expect(lastClose).toBeLessThan(firstCreate);
+      expect(upstream.calls.filter((c) => c.name === 'create_session')).toHaveLength(2);
+      expect(await upstream.health()).toEqual({ sessions: 2, workers: 2 });
+      expect(running.sessions.win.id).toBe(SESSION_IDS[WIN_PATH]);
+      expect(running.sessions.mac.id).toBe(SESSION_IDS[MAC_PATH]);
+    } finally {
+      await running.close();
+    }
+  });
+
+  it('without reclaiming still refuses a daemon that holds sessions', async () => {
+    const upstream = new FakeUpstream();
+    upstream.sessions.push({ id: 'someone-writable', status: 'ready' });
+    await expect(startGateway(loadConfig(PRIVATE), { upstream, log: () => {} })).rejects.toThrow(/daemon of its own/);
+    expect(upstream.calls.some((c) => c.name === 'close_session')).toBe(false);
+  });
+
+  it('reclaims only a loopback daemon it requires to be its own', () => {
+    expect(() => loadConfig({ GATEWAY_UPSTREAM_URL: 'http://ghidra-mcp:8432', GATEWAY_RECLAIM_SESSIONS: '1' }))
+      .toThrow(/loopback/);
+    expect(() => loadConfig({
+      ...PRIVATE, GATEWAY_RECLAIM_SESSIONS: '1', GATEWAY_REQUIRE_DEDICATED_UPSTREAM: '0',
+    })).toThrow(/DEDICATED/);
+    expect(loadConfig({ ...PRIVATE, GATEWAY_RECLAIM_SESSIONS: '1' }).reclaimSessions).toBe(true);
+  });
+
+  it('a foreign session that appears after startup still stops it serving', async () => {
+    const upstream = new FakeUpstream();
+    upstream.sessions.push({ id: 'aaaaaaaa-0000-4000-8000-000000000001', status: 'ready', program: WIN_PATH });
+    const running = await startGateway(
+      loadConfig({ ...PRIVATE, GATEWAY_RECLAIM_SESSIONS: '1', GATEWAY_ISOLATION_CHECK_MS: '20' }),
+      { upstream, log: () => {} },
+    );
+    const base = `http://127.0.0.1:${running.port}`;
+    try {
+      expect((await fetch(`${base}/health`)).status).toBe(200);
+      upstream.sessions.push({ id: 'intruder', status: 'ready' });
+      await vi.waitFor(async () => expect((await fetch(`${base}/health`)).status).toBe(503), { timeout: 2000 });
+      const res = await running.gateway.callTool(ALICE, 'get_program_info', {});
+      expect(res.isError).toBe(true);
+      expect(upstream.calls.some((c) => c.name === 'close_session' && c.args.sessionId === 'intruder')).toBe(false);
+    } finally {
+      await running.close();
+    }
   });
 });
 

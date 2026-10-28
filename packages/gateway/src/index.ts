@@ -13,6 +13,7 @@ import { Gateway, type ProgramSessions } from './gateway.js';
 import { QuotaManager } from './quota.js';
 import { createHttpServer } from './server.js';
 import { HttpUpstream, PinnedSession, type Upstream } from './upstream.js';
+import { reclaimUpstream, waitForUpstream } from './startup.js';
 
 export * from './allowlist.js';
 export { checkCall, buildPublicTools, publicToolNames, RefusedError, type PublicTool } from './tools.js';
@@ -22,7 +23,10 @@ export {
 export { QuotaManager } from './quota.js';
 export { AuditLog, hashArgs } from './audit.js';
 export { Gateway, capBytes, publicError } from './gateway.js';
-export { HttpUpstream, PinnedSession, UpstreamError, type Upstream, type ServedVersion } from './upstream.js';
+export {
+  HttpUpstream, PinnedSession, UpstreamError, type Upstream, type UpstreamHealth, type ServedVersion,
+} from './upstream.js';
+export { waitForUpstream, reclaimUpstream, type StartupOptions } from './startup.js';
 export { AccessJwtVerifier, ACCESS_JWT_HEADER, type JwksFetch } from './access-jwt.js';
 export { loadConfig, DEFAULT_PROGRAMS, type GatewayConfig } from './config.js';
 export { createHttpServer, type GatewayStatus } from './server.js';
@@ -36,14 +40,24 @@ export interface RunningGateway {
 }
 
 /**
- * Open the pinned session, then listen. The session is opened before the port
- * is, so a gateway that cannot reach its program never accepts a call.
+ * Wait for the daemon, clear what an earlier gateway left on it (when it is
+ * private to this one), open the pinned sessions, then listen. The sessions are
+ * opened before the port is, so a gateway that cannot reach its program never
+ * accepts a call.
  */
 export async function startGateway(
   config: GatewayConfig,
-  deps: { upstream?: Upstream; fetch?: FetchLike; auditSink?: AuditSink; jwksFetch?: JwksFetch; now?: () => number } = {},
+  deps: {
+    upstream?: Upstream; fetch?: FetchLike; auditSink?: AuditSink; jwksFetch?: JwksFetch; now?: () => number;
+    log?: (line: string) => void; sleep?: (ms: number) => Promise<void>;
+  } = {},
 ): Promise<RunningGateway> {
   const upstream = deps.upstream ?? new HttpUpstream(config.upstreamUrl, config.upstreamToken);
+  const log = deps.log ?? ((line: string) => { process.stderr.write(`${line}\n`); });
+  await waitForUpstream(upstream, { timeoutMs: config.upstreamWaitMs, log, sleep: deps.sleep });
+  if (config.reclaimSessions) {
+    await reclaimUpstream(upstream, { timeoutMs: 120_000, log, sleep: deps.sleep });
+  }
   const built: Partial<Record<PublicProgram, PinnedSession>> = {};
   for (const name of PUBLIC_PROGRAMS) {
     const target = config.programs[name];

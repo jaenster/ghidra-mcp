@@ -35,6 +35,14 @@ export interface GatewayConfig {
   upstreamToken?: string;
   programs: Record<PublicProgram, ProgramTarget>;
   requireDedicatedUpstream: boolean;
+  /** How long to wait at startup for the daemon to answer. */
+  upstreamWaitMs: number;
+  /**
+   * Close every session on the daemon at startup. Only for a daemon private to
+   * the gateway (loopback, inside its pod): what it holds then is what an earlier
+   * gateway process left behind. Without it the gateway refuses such a daemon.
+   */
+  reclaimSessions: boolean;
   authMode: AuthMode;
   /** Cloudflare Access service token the edge sends; when set, required on everything but /health. */
   accessClientId?: string;
@@ -108,6 +116,19 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): GatewayConfig 
   if (authMode === 'edge' && flag(env, 'GATEWAY_ALLOW_ANONYMOUS', false)) {
     throw new Error('GATEWAY_ALLOW_ANONYMOUS cannot be combined with GATEWAY_AUTH_MODE=edge');
   }
+  const requireDedicatedUpstream = flag(env, 'GATEWAY_REQUIRE_DEDICATED_UPSTREAM', true);
+  const reclaimSessions = flag(env, 'GATEWAY_RECLAIM_SESSIONS', false);
+  if (reclaimSessions) {
+    if (!requireDedicatedUpstream) {
+      throw new Error('GATEWAY_RECLAIM_SESSIONS needs GATEWAY_REQUIRE_DEDICATED_UPSTREAM');
+    }
+    let host = '';
+    try { host = new URL(upstreamUrl).hostname; } catch { /* reported below */ }
+    if (!['127.0.0.1', 'localhost', '[::1]'].includes(host)) {
+      throw new Error('GATEWAY_RECLAIM_SESSIONS closes every session on the daemon, so it needs a loopback '
+        + `GATEWAY_UPSTREAM_URL (a daemon private to the gateway), got "${upstreamUrl}"`);
+    }
+  }
   const target = (key: 'WIN' | 'MAC', dflt: ProgramTarget): ProgramTarget => ({
     program: env[`GATEWAY_PROGRAM_${key}`]?.trim() || dflt.program,
     programPath: env[`GATEWAY_PROGRAM_PATH_${key}`]?.trim() || undefined,
@@ -118,7 +139,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): GatewayConfig 
     upstreamUrl,
     upstreamToken: env.GATEWAY_UPSTREAM_TOKEN || undefined,
     programs: { win: target('WIN', DEFAULT_PROGRAMS.win), mac: target('MAC', DEFAULT_PROGRAMS.mac) },
-    requireDedicatedUpstream: flag(env, 'GATEWAY_REQUIRE_DEDICATED_UPSTREAM', true),
+    requireDedicatedUpstream,
+    upstreamWaitMs: num(env, 'GATEWAY_UPSTREAM_WAIT_MS', 300_000, 0),
+    reclaimSessions,
     authMode,
     accessClientId,
     accessClientSecret,

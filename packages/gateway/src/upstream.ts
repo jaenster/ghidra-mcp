@@ -9,8 +9,16 @@ export interface UpstreamResult {
   isError: boolean;
 }
 
+/** What the daemon's /health reports: counts only. */
+export interface UpstreamHealth {
+  sessions: number;
+  workers: number;
+}
+
 export interface Upstream {
   call(name: string, args: Record<string, unknown>, timeoutMs: number): Promise<UpstreamResult>;
+  /** The daemon's /health. Throws UpstreamError while the daemon is not answering. */
+  health?(timeoutMs: number): Promise<UpstreamHealth>;
 }
 
 /**
@@ -29,6 +37,21 @@ export class HttpUpstream implements Upstream {
   private nextId = 1;
 
   constructor(private readonly baseUrl: string, private readonly token?: string) {}
+
+  async health(timeoutMs: number): Promise<UpstreamHealth> {
+    let res: Response;
+    try {
+      res = await fetch(`${this.baseUrl.replace(/\/+$/, '')}/health`, { signal: AbortSignal.timeout(timeoutMs) });
+    } catch {
+      throw new UpstreamError('daemon unreachable');
+    }
+    if (res.status !== 200) throw new UpstreamError(`daemon health answered HTTP ${res.status}`);
+    const body = await res.json() as { sessions?: unknown; workers?: unknown };
+    return {
+      sessions: typeof body.sessions === 'number' ? body.sessions : 0,
+      workers: typeof body.workers === 'number' ? body.workers : 0,
+    };
+  }
 
   async call(name: string, args: Record<string, unknown>, timeoutMs: number): Promise<UpstreamResult> {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };

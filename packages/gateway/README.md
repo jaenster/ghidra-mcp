@@ -59,11 +59,18 @@ whatever session already has the program open - writable ones included - so a
 read-only caller would see other clients' uncommitted edits. The gateway guards this
 three ways:
 
-- at startup it refuses a daemon that already holds sessions;
+- at startup it refuses a daemon that already holds sessions, unless
+  `GATEWAY_RECLAIM_SESSIONS=1`: then the daemon is private to the gateway (loopback
+  only, enforced), so whatever it holds was left by an earlier gateway process. The
+  gateway closes all of it, waits until the daemon reports no session and no worker,
+  and only then opens its own;
 - it refuses a `create_session` answer that is not a session it just created;
 - a watchdog (`GATEWAY_ISOLATION_CHECK_MS`) re-lists the daemon's sessions, and if a
   foreign session appears or another client attaches to the pinned one, the gateway
   stops answering and `/health` returns 503 until it is restarted.
+
+At startup the gateway waits for the daemon to answer (`GATEWAY_UPSTREAM_WAIT_MS`),
+so it may start before the daemon.
 
 Run the daemon on loopback in the gateway's pod (`GHIDRA_MCP_HOST=127.0.0.1`), with
 its own data directory and Ghidra Server account, and expose only the gateway port.
@@ -88,6 +95,8 @@ its own data directory and Ghidra Server account, and expose only the gateway po
 |`GATEWAY_MAX_CONCURRENT_COSTLY`|`2`|gateway-wide|
 |`GATEWAY_MAX_RESPONSE_BYTES`|`262144`|longer responses are cut with a marker|
 |`GATEWAY_REQUIRE_DEDICATED_UPSTREAM`|`1`|the startup and watchdog checks above|
+|`GATEWAY_RECLAIM_SESSIONS`|`0`|`1` closes every session on the daemon at startup; needs a loopback upstream|
+|`GATEWAY_UPSTREAM_WAIT_MS`|`300000`|how long startup waits for the daemon to answer|
 
 Callers send `Authorization: Bearer <GitHub token>`; the gateway checks it against
 GitHub's `/user` and caches the answer by token hash for `GATEWAY_AUTH_CACHE_TTL_MS`.
