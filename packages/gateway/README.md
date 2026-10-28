@@ -13,7 +13,14 @@ or daemon internal reaches a caller:
 
 - answers lose `DENIED_RESPONSE_KEYS` at any depth, and `get_program_info` keeps only
   what is in the binary (`keepKeys`);
-- every answer goes through the deny-pattern redactor (`src/redact.ts`);
+- `get_program_info` reports the program as `Game.exe` (win) or `DiabloII_macho` (mac),
+  never the database name on the server;
+- every string in an answer goes through the deny-pattern redactor (`src/redact.ts`): the
+  debug build number `3.0.91923`, debug-build repository paths, `___D2_REVERSE` and repository
+  names remove only their line inside a multi-line value such as pseudocode (`/* [redacted] */`
+  in code, so the line count stays) and only the match in a single-line value; home paths,
+  `docs/data/` paths, server hosts, UUIDs and ULIDs remove only the match. Mentions of D2R,
+  Hellfire and STORM.PDB are not redacted;
 - daemon errors are mapped to four fixed messages (not found, invalid arguments, too
   slow, failed); the daemon text only reaches the audit log's `reason`;
 - `/health` answers `ok` or `unavailable` and nothing else. Versions and their age are on

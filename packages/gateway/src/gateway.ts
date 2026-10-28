@@ -5,7 +5,7 @@
  */
 
 import { formatResponse } from '@ghidra-mcp/mcp';
-import { DENIED_RESPONSE_KEYS, EXPOSED_TOOLS, type PublicProgram } from './allowlist.js';
+import { DENIED_RESPONSE_KEYS, EXPOSED_TOOLS, PUBLIC_PROGRAM_NAMES, type PublicProgram } from './allowlist.js';
 import { stripResponseKeys } from './public-tools.js';
 import { Redactor } from './redact.js';
 import type { AuditLog, Outcome } from './audit.js';
@@ -110,10 +110,9 @@ export class Gateway {
         return finish(errorResult(publicError(res.text)), 'error', errorClass(res.text));
       }
       const format = callOptions.format ?? this.formats.get(identity.key) ?? 'toon';
-      const shaped = this.shape(call.name, res.text, format, session.id);
-      const redacted = this.redactor.redact(shaped);
-      redactions = redacted.count;
-      const { text: capped, truncated } = capBytes(redacted.text, this.options.maxResponseBytes);
+      const shaped = this.shape(call.name, call.program, res.text, format, session.id);
+      redactions = shaped.redactions;
+      const { text: capped, truncated } = capBytes(shaped.text, this.options.maxResponseBytes);
       return finish(textResult(capped), 'ok', undefined, truncated);
     } catch (err) {
       if (err instanceof UpstreamError) return finish(errorResult(err.publicMessage), 'upstream_error', err.message);
@@ -123,17 +122,35 @@ export class Gateway {
     }
   }
 
-  /** The daemon answers in JSON: drop what describes the server, re-encode, scrub what is left. */
-  private shape(toolName: string, text: string, format: Format, sessionId: string | null): string {
+  /**
+   * The daemon answers in JSON: drop what describes the server, report the
+   * program under its public name, redact every string, re-encode, scrub what is left.
+   */
+  private shape(toolName: string, program: PublicProgram, text: string, format: Format, sessionId: string | null): { text: string; redactions: number } {
     let out: string;
+    let redactions: number;
+    let data: unknown;
     try {
-      out = formatResponse(stripResponseKeys(toolName, JSON.parse(text), DENIED_RESPONSE_KEYS), format);
+      data = JSON.parse(text);
     } catch {
-      out = text;
+      data = undefined;
+    }
+    if (data === undefined) {
+      const r = this.redactor.redact(text);
+      out = r.text;
+      redactions = r.count;
+    } else {
+      let shaped = stripResponseKeys(toolName, data, DENIED_RESPONSE_KEYS);
+      if (toolName === 'get_program_info' && shaped !== null && typeof shaped === 'object' && !Array.isArray(shaped) && 'name' in shaped) {
+        shaped = { ...shaped, name: PUBLIC_PROGRAM_NAMES[program] };
+      }
+      const r = this.redactor.redactTree(shaped);
+      out = formatResponse(r.value, format);
+      redactions = r.count;
     }
     out = out.replace(/ghidra:\/\/[^\s"',)]+/g, '[redacted]');
     if (sessionId) out = out.split(sessionId).join('[redacted]');
-    return out;
+    return { text: out, redactions };
   }
 }
 

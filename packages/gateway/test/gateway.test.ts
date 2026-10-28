@@ -25,11 +25,11 @@ const SESSION_IDS: Record<string, string> = {
 };
 
 /**
- * Strings that must never reach a caller: repository and program names, other
- * builds, other repositories, the server host. Session ids are checked by shape.
+ * Strings that must never reach a caller: repository and program paths, the
+ * debug build, other repositories, the server host. Mentions of D2R are fine. Session ids are checked by shape.
  */
 const FORBIDDEN = [
-  'Diablo2Lod', 'd2r', 'D2R', 'debug', 'A2Racer2', 'ClaudeVM', 'Factorio', 'SimTower', 'UT2004',
+  'Diablo2Lod', '/windows/d2r', 'debug_d2r', '3.0.91923', 'A2Racer2', 'ClaudeVM', 'Factorio', 'SimTower', 'UT2004',
   'ghidra.typeguru.nl', 'typeguru', '/windows/', '/mac/', '1.14d/', 'ghidra://',
 ];
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
@@ -65,7 +65,7 @@ class FakeUpstream implements Upstream {
     if (name === 'get_program_info') {
       return {
         text: JSON.stringify({
-          name: program.split('/').at(-1), path: `C:\\Users\\builder\\${program}`, format: 'PE', languageId: 'x86:LE:32:default',
+          name: `${program.split('/').at(-1)}-v2`, path: `C:\\Users\\builder\\${program}`, format: 'PE', languageId: 'x86:LE:32:default',
           imageBase: '0x400000', pointerSize: 4, version: this.versions[program], latestVersion: this.versions[program],
           versionLoadedAt: 1_700_000_000_000,
         }),
@@ -259,7 +259,51 @@ describe('no intel about the server', () => {
       const text = (await gateway.callTool(ALICE, 'get_program_info', { program })).content[0].text;
       const info = JSON.parse(text);
       expect(Object.keys(info).sort()).toEqual(['format', 'imageBase', 'languageId', 'name', 'pointerSize']);
+      expect(info.name).toBe(program === 'win' ? 'Game.exe' : 'DiabloII_macho');
       expectClean(text);
+    }
+  });
+
+  it('get_program_info reports the public program name in TOON too', async () => {
+    const { gateway } = makeGateway();
+    const text = (await gateway.callTool(ALICE, 'get_program_info', { program: 'mac' })).content[0].text;
+    expect(text).toContain('name: DiabloII_macho\n');
+    expect(text).not.toContain('-v2');
+  });
+
+  it('redacts only the bad line of multi-line pseudocode and lets D2R through', async () => {
+    const { upstream, gateway } = makeGateway();
+    const code = [
+      '/* Reads the app mode from the command line.',
+      '   Checked against the asm; not inferred and not from D2R.',
+      '   Same as the 3.0.91923 build. */',
+      '',
+      'int CLIENT_CheckMode(int *mode, char *text)',
+      '{',
+      '  return 0; /* Hellfire STORM.PDB */',
+      '}',
+    ].join('\n');
+    upstream.respond = () => ({ functionName: 'CLIENT_CheckMode', code, comment: 'one line: build 3.0.91923 here' });
+    for (const format of ['json', 'toon'] as const) {
+      await gateway.callTool(ALICE, 'set_output_format', { format });
+      const text = (await gateway.callTool(ALICE, 'decompile', { name: 'CLIENT_CheckMode' })).content[0].text;
+      expect(text).not.toContain('3.0.91923');
+      expect(text).toContain('not inferred and not from D2R.');
+      expect(text).toContain('Hellfire STORM.PDB');
+      if (format === 'json') {
+        const got = JSON.parse(text) as { code: string; comment: string };
+        expect(got.code.split('\n')).toEqual([
+          '/* Reads the app mode from the command line.',
+          '   Checked against the asm; not inferred and not from D2R.',
+          '   [redacted] */',
+          '',
+          'int CLIENT_CheckMode(int *mode, char *text)',
+          '{',
+          '  return 0; /* Hellfire STORM.PDB */',
+          '}',
+        ]);
+        expect(got.comment).toBe('one line: build [redacted] here');
+      }
     }
   });
 
@@ -275,7 +319,7 @@ describe('no intel about the server', () => {
     await gateway.callTool(ALICE, 'set_output_format', { format: 'json' });
     const text = (await gateway.callTool(ALICE, 'list_functions', {})).content[0].text;
     expectClean(text);
-    for (const s of ['3.0.91923', 'Hellfire', 'STORM.PDB', '___D2_REVERSE', '/Users/', 'docs/data/', '01HZX3K8Q9ABCDEFGHJKMNPQRS']) {
+    for (const s of ['3.0.91923', '___D2_REVERSE', '/Users/', 'docs/data/', '01HZX3K8Q9ABCDEFGHJKMNPQRS']) {
       expect(text).not.toContain(s);
     }
     expect(text).toContain('4D5A90000300000004000000FFFF0000B8');

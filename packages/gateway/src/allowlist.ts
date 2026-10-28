@@ -109,6 +109,11 @@ export const PINNING_ARGS: readonly string[] = [
 export const PUBLIC_PROGRAMS = ['win', 'mac'] as const;
 export type PublicProgram = typeof PUBLIC_PROGRAMS[number];
 export const DEFAULT_PROGRAM: PublicProgram = 'win';
+/**
+ * The name get_program_info reports for each program. The database name on the
+ * server carries internal suffixes; callers see the binary's own file name.
+ */
+export const PUBLIC_PROGRAM_NAMES: Readonly<Record<PublicProgram, string>> = { win: 'Game.exe', mac: 'DiabloII_macho' };
 /** The one argument that selects a program, and only from PUBLIC_PROGRAMS. */
 export const PROGRAM_ARG = 'program';
 
