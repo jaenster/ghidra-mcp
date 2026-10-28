@@ -4,7 +4,7 @@
  * authenticated before the MCP layer sees it.
  *
  * Nothing here answers with daemon detail: /health says ok or not, and the
- * versions and their age are only on /internal/*, behind the service token.
+ * versions and their age are only on /internal/*, behind the Access check.
  */
 
 import * as http from 'node:http';
@@ -15,7 +15,7 @@ import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
 import type { AuditLog } from './audit.js';
 import type { PublicProgram } from './allowlist.js';
 import {
-  AuthError, edgeIdentity, hashToken, hasServiceToken, type Authenticator, type Identity,
+  AuthError, edgeIdentity, hashToken, type Authenticator, type Identity,
 } from './auth.js';
 import type { AuthMode } from './config.js';
 import type { Format, Gateway } from './gateway.js';
@@ -32,8 +32,11 @@ export interface HttpServerOptions {
   audit: AuditLog;
   maxBodyBytes: number;
   authMode?: AuthMode;
-  /** When set, every request but /health must carry this Access service token. */
-  accessToken?: { clientId: string; clientSecret: string };
+  /**
+   * When set, every request but /health must pass it: the Access service token
+   * itself, or a valid Access JWT for the origin's application.
+   */
+  accessCheck?: (headers: http.IncomingHttpHeaders) => boolean | Promise<boolean>;
   status?: () => GatewayStatus;
 }
 
@@ -96,8 +99,7 @@ export function createHttpServer(options: HttpServerOptions): http.Server {
       return;
     }
 
-    if (options.accessToken
-      && !hasServiceToken(req.headers, options.accessToken.clientId, options.accessToken.clientSecret)) {
+    if (options.accessCheck && !(await options.accessCheck(req.headers))) {
       audit.record({
         identity: null, tool: '-', args: {}, durationMs: 0, bytes: 0,
         outcome: 'unauthenticated', reason: 'service_token',
@@ -107,7 +109,7 @@ export function createHttpServer(options: HttpServerOptions): http.Server {
     }
 
     if (url.pathname.startsWith('/internal/')) {
-      if (req.method !== 'GET' || !options.accessToken) {
+      if (req.method !== 'GET' || !options.accessCheck) {
         sendJson(res, 404, { error: 'Not found' });
         return;
       }

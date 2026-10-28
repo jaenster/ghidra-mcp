@@ -15,8 +15,9 @@ export interface ProgramTarget {
 /**
  * github: callers send a GitHub token, checked against GitHub.
  * edge: the gateway sits behind the edge Worker, which has already signed the
- * caller in; requests must carry the Access service token, and only then is
- * the identity header the edge sends trusted.
+ * caller in; requests must pass the Access check (the service token itself, or
+ * the Access JWT for the origin's application), and only then is the identity
+ * header the edge sends trusted.
  */
 export type AuthMode = 'github' | 'edge';
 
@@ -38,6 +39,11 @@ export interface GatewayConfig {
   /** Cloudflare Access service token the edge sends; when set, required on everything but /health. */
   accessClientId?: string;
   accessClientSecret?: string;
+  /**
+   * Cloudflare Access application the origin sits behind; when set, every request
+   * but /health must carry a valid Cf-Access-Jwt-Assertion for it.
+   */
+  accessJwt?: { teamDomain: string; audience: string; serviceTokenId?: string };
   /** How often the served version of each program is re-read from its worker. */
   versionPollMs: number;
   allowAnonymous: boolean;
@@ -80,8 +86,24 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): GatewayConfig 
   if (!!accessClientId !== !!accessClientSecret) {
     throw new Error('GATEWAY_ACCESS_CLIENT_ID and GATEWAY_ACCESS_CLIENT_SECRET are set together or not at all');
   }
-  if (authMode === 'edge' && !accessClientId) {
-    throw new Error('GATEWAY_AUTH_MODE=edge needs GATEWAY_ACCESS_CLIENT_ID and GATEWAY_ACCESS_CLIENT_SECRET');
+  const teamDomain = env.GATEWAY_ACCESS_TEAM_DOMAIN?.trim().replace(/\/+$/, '') || undefined;
+  const audience = env.GATEWAY_ACCESS_AUD?.trim() || undefined;
+  if (!!teamDomain !== !!audience) {
+    throw new Error('GATEWAY_ACCESS_TEAM_DOMAIN and GATEWAY_ACCESS_AUD are set together or not at all');
+  }
+  if (teamDomain && !/^https:\/\/[a-z0-9-]+\.cloudflareaccess\.com$/.test(teamDomain)) {
+    throw new Error(`GATEWAY_ACCESS_TEAM_DOMAIN must be https://<team>.cloudflareaccess.com, got "${teamDomain}"`);
+  }
+  const serviceTokenId = env.GATEWAY_ACCESS_SERVICE_TOKEN_ID?.trim() || undefined;
+  if (serviceTokenId && !teamDomain) {
+    throw new Error('GATEWAY_ACCESS_SERVICE_TOKEN_ID needs GATEWAY_ACCESS_TEAM_DOMAIN and GATEWAY_ACCESS_AUD');
+  }
+  if (accessClientId && teamDomain) {
+    throw new Error('Configure the Access service token or the Access JWT check, not both');
+  }
+  if (authMode === 'edge' && !accessClientId && !teamDomain) {
+    throw new Error('GATEWAY_AUTH_MODE=edge needs GATEWAY_ACCESS_CLIENT_ID and GATEWAY_ACCESS_CLIENT_SECRET, '
+      + 'or GATEWAY_ACCESS_TEAM_DOMAIN and GATEWAY_ACCESS_AUD');
   }
   if (authMode === 'edge' && flag(env, 'GATEWAY_ALLOW_ANONYMOUS', false)) {
     throw new Error('GATEWAY_ALLOW_ANONYMOUS cannot be combined with GATEWAY_AUTH_MODE=edge');
@@ -100,6 +122,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): GatewayConfig 
     authMode,
     accessClientId,
     accessClientSecret,
+    accessJwt: teamDomain && audience ? { teamDomain, audience, serviceTokenId } : undefined,
     versionPollMs: num(env, 'GATEWAY_VERSION_POLL_MS', 60_000),
     allowAnonymous: flag(env, 'GATEWAY_ALLOW_ANONYMOUS', false),
     githubApiUrl: env.GATEWAY_GITHUB_API_URL?.trim() || 'https://api.github.com',

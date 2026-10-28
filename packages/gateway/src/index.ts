@@ -6,7 +6,8 @@
 import type * as http from 'node:http';
 import { PUBLIC_PROGRAMS, type PublicProgram } from './allowlist.js';
 import { AuditLog, type AuditSink } from './audit.js';
-import { Authenticator, type FetchLike } from './auth.js';
+import { Authenticator, hasServiceToken, type FetchLike } from './auth.js';
+import { AccessJwtVerifier, type JwksFetch } from './access-jwt.js';
 import type { GatewayConfig } from './config.js';
 import { Gateway, type ProgramSessions } from './gateway.js';
 import { QuotaManager } from './quota.js';
@@ -22,6 +23,7 @@ export { QuotaManager } from './quota.js';
 export { AuditLog, hashArgs } from './audit.js';
 export { Gateway, capBytes, publicError } from './gateway.js';
 export { HttpUpstream, PinnedSession, UpstreamError, type Upstream, type ServedVersion } from './upstream.js';
+export { AccessJwtVerifier, ACCESS_JWT_HEADER, type JwksFetch } from './access-jwt.js';
 export { loadConfig, DEFAULT_PROGRAMS, type GatewayConfig } from './config.js';
 export { createHttpServer, type GatewayStatus } from './server.js';
 
@@ -39,7 +41,7 @@ export interface RunningGateway {
  */
 export async function startGateway(
   config: GatewayConfig,
-  deps: { upstream?: Upstream; fetch?: FetchLike; auditSink?: AuditSink } = {},
+  deps: { upstream?: Upstream; fetch?: FetchLike; auditSink?: AuditSink; jwksFetch?: JwksFetch; now?: () => number } = {},
 ): Promise<RunningGateway> {
   const upstream = deps.upstream ?? new HttpUpstream(config.upstreamUrl, config.upstreamToken);
   const built: Partial<Record<PublicProgram, PinnedSession>> = {};
@@ -104,15 +106,21 @@ export async function startGateway(
     cheapTimeoutMs: config.cheapTimeoutMs,
     costlyTimeoutMs: config.costlyTimeoutMs,
   });
+  const { accessClientId, accessClientSecret, accessJwt } = config;
+  let accessCheck: ((headers: http.IncomingHttpHeaders) => boolean | Promise<boolean>) | undefined;
+  if (accessClientId && accessClientSecret) {
+    accessCheck = (headers) => hasServiceToken(headers, accessClientId, accessClientSecret);
+  } else if (accessJwt) {
+    const verifier = new AccessJwtVerifier({ ...accessJwt, fetch: deps.jwksFetch, now: deps.now });
+    accessCheck = (headers) => verifier.check(headers);
+  }
   const server = createHttpServer({
     gateway,
     auth,
     audit,
     maxBodyBytes: config.maxBodyBytes,
     authMode: config.authMode,
-    accessToken: config.accessClientId && config.accessClientSecret
-      ? { clientId: config.accessClientId, clientSecret: config.accessClientSecret }
-      : undefined,
+    accessCheck,
     status: () => ({
       serving: PUBLIC_PROGRAMS.every((name) => !sessions[name].brokenReason),
       programs: { win: sessions.win.servedVersion, mac: sessions.mac.servedVersion },

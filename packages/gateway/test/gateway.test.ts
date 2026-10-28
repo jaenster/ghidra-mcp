@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { generateKeyPairSync, sign as rsaSign, type KeyObject } from 'node:crypto';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { AuditLog } from '../src/audit.js';
@@ -9,6 +10,7 @@ import { Gateway, capBytes } from '../src/gateway.js';
 import { QuotaManager } from '../src/quota.js';
 import { startGateway } from '../src/index.js';
 import { DEFAULT_PROGRAMS, loadConfig } from '../src/config.js';
+import type { JwksFetch } from '../src/access-jwt.js';
 import { PinnedSession, type Upstream, type UpstreamResult } from '../src/upstream.js';
 
 const ALICE: Identity = { key: 'gh:1', githubId: 1, login: 'alice' };
@@ -376,7 +378,7 @@ describe('HTTP surface', () => {
   const TOKEN_HEADERS = { 'CF-Access-Client-Id': 'edge-id.access', 'CF-Access-Client-Secret': 'edge-secret' };
   const MCP_HEADERS = { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' };
 
-  async function start(env: Record<string, string>) {
+  async function start(env: Record<string, string>, extra: { jwksFetch?: JwksFetch } = {}) {
     const upstream = new FakeUpstream();
     const lines: string[] = [];
     const fetch: FetchLike = async (_url, init) => {
@@ -385,7 +387,7 @@ describe('HTTP surface', () => {
     };
     const running = await startGateway(
       loadConfig({ GATEWAY_UPSTREAM_URL: 'http://unused', GATEWAY_PORT: '0', ...env }),
-      { upstream, fetch, auditSink: (l) => lines.push(l) },
+      { upstream, fetch, auditSink: (l) => lines.push(l), ...extra },
     );
     return { running, upstream, lines, base: `http://127.0.0.1:${running.port}` };
   }
@@ -508,5 +510,102 @@ describe('HTTP surface', () => {
     } finally {
       await running.close();
     }
+  });
+
+  describe('Access JWT check', () => {
+    const TEAM = 'https://example-team.cloudflareaccess.com';
+    const AUD = 'a1b2c3d4e5f6';
+    const TOKEN_ID = 'edge-id.access';
+    const JWT_ENV = {
+      GATEWAY_AUTH_MODE: 'edge', GATEWAY_ACCESS_TEAM_DOMAIN: TEAM, GATEWAY_ACCESS_AUD: AUD,
+      GATEWAY_ACCESS_SERVICE_TOKEN_ID: TOKEN_ID,
+    };
+    const signing = generateKeyPairSync('rsa', { modulusLength: 2048 });
+    const stranger = generateKeyPairSync('rsa', { modulusLength: 2048 });
+    const jwk = { ...signing.publicKey.export({ format: 'jwk' }), kid: 'k1', alg: 'RS256', use: 'sig' };
+    let certFetches = 0;
+    const jwksFetch: JwksFetch = async (url) => {
+      certFetches++;
+      expect(url).toBe(`${TEAM}/cdn-cgi/access/certs`);
+      return { status: 200, json: async () => ({ keys: [jwk] }) };
+    };
+
+    function jwt(claims: Record<string, unknown>, key: KeyObject = signing.privateKey, kid = 'k1'): string {
+      const enc = (v: unknown) => Buffer.from(JSON.stringify(v)).toString('base64url');
+      const body = `${enc({ alg: 'RS256', kid, typ: 'JWT' })}.${enc(claims)}`;
+      return `${body}.${rsaSign('RSA-SHA256', Buffer.from(body), key).toString('base64url')}`;
+    }
+    const now = () => Math.floor(Date.now() / 1000);
+    const good = () => ({ iss: TEAM, aud: [AUD], exp: now() + 300, iat: now(), nbf: now() - 1, common_name: TOKEN_ID, type: 'app' });
+
+    it('needs both team domain and audience, and a real team domain', () => {
+      expect(() => loadConfig({ GATEWAY_UPSTREAM_URL: 'http://x', GATEWAY_ACCESS_TEAM_DOMAIN: TEAM })).toThrow(/together/);
+      expect(() => loadConfig({ GATEWAY_UPSTREAM_URL: 'http://x', GATEWAY_ACCESS_TEAM_DOMAIN: 'https://evil.example', GATEWAY_ACCESS_AUD: AUD }))
+        .toThrow(/cloudflareaccess/);
+      expect(() => loadConfig({ GATEWAY_UPSTREAM_URL: 'http://x', ...JWT_ENV, GATEWAY_ACCESS_CLIENT_ID: 'a', GATEWAY_ACCESS_CLIENT_SECRET: 'b' }))
+        .toThrow(/not both/);
+      expect(loadConfig({ GATEWAY_UPSTREAM_URL: 'http://x', ...JWT_ENV }).accessJwt)
+        .toEqual({ teamDomain: TEAM, audience: AUD, serviceTokenId: TOKEN_ID });
+    });
+
+    it('refuses requests without a valid token for this application', async () => {
+      const { running, upstream, base } = await start(JWT_ENV, { jwksFetch });
+      try {
+        const before = upstream.calls.length;
+        const bad = [
+          undefined,
+          'not.a.jwt',
+          jwt({ ...good(), aud: ['other-app'] }),
+          jwt({ ...good(), iss: 'https://other-team.cloudflareaccess.com' }),
+          jwt({ ...good(), exp: now() - 3600 }),
+          jwt({ ...good(), nbf: now() + 3600 }),
+          jwt({ ...good(), common_name: 'someone-else.access' }),
+          jwt({ ...good(), common_name: undefined, email: 'user@example.com' }),
+          jwt(good(), stranger.privateKey),
+          jwt(good(), signing.privateKey, 'unknown-kid'),
+          // The plain service token headers are not enough in this mode.
+          undefined,
+        ];
+        for (const [i, token] of bad.entries()) {
+          const headers: Record<string, string> = {
+            ...MCP_HEADERS, 'X-Edge-Identity': 'gh:9', 'X-Edge-Login': 'mallory',
+            ...(i === bad.length - 1 ? TOKEN_HEADERS : {}),
+          };
+          if (token) headers['Cf-Access-Jwt-Assertion'] = token;
+          const res = await fetch(`${base}/mcp`, { method: 'POST', headers, body: rpc('tools/list') });
+          expect(res.status, `case ${i}`).toBe(403);
+          expectClean(await res.text());
+        }
+        expect((await fetch(`${base}/internal/versions`)).status).toBe(403);
+        expect(upstream.calls.length).toBe(before);
+        expect((await fetch(`${base}/health`)).status).toBe(200);
+      } finally {
+        await running.close();
+      }
+    });
+
+    it('takes the edge identity with a valid token, and fetches keys once', async () => {
+      certFetches = 0;
+      const { running, lines, base } = await start(JWT_ENV, { jwksFetch });
+      try {
+        const v = await fetch(`${base}/internal/versions`, { headers: { 'Cf-Access-Jwt-Assertion': jwt(good()) } });
+        expect(await v.json()).toEqual({ win: 1757, mac: 312 });
+        const client = new Client({ name: 'edge', version: '1.0.0' });
+        await client.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), {
+          requestInit: { headers: { 'Cf-Access-Jwt-Assertion': jwt(good()), 'X-Edge-Identity': 'gh:99', 'X-Edge-Login': 'dave' } },
+        }));
+        try {
+          const res = await client.callTool({ name: 'get_program_info', arguments: {} });
+          expect(res.isError).toBeFalsy();
+        } finally {
+          await client.close();
+        }
+        expect(lines.map((l) => JSON.parse(l)).find((a) => a.tool === 'get_program_info'))
+          .toMatchObject({ identity: 'gh:99', login: 'dave', outcome: 'ok' });
+        expect(certFetches).toBe(1);
+      } finally {
+        await running.close();
+      }
+    });
   });
 });
