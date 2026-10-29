@@ -174,7 +174,7 @@ export const EXCLUDED_GROUPS: Readonly<Record<string, ExcludedGroup>> = {
     reason: 'mutate the program, even in memory on a read-only session; writes go through a separate proposal flow',
     tools: [
       'rename_symbol', 'set_comment', 'set_data_type', 'set_prototype', 'set_custom_signature',
-      'create_structure', 'batch_rename', 'add_bookmark', 'delete_bookmark', 'delete_comment',
+      'create_structure', 'batch_rename', 'apply_changeset', 'add_bookmark', 'delete_bookmark', 'delete_comment',
       'create_label', 'delete_label', 'create_function', 'delete_function', 'create_enum', 'create_union',
       'create_typedef', 'create_funcdef', 'set_function_attributes', 'add_function_tag',
       'remove_function_tag', 'batch_tag_symbols', 'create_namespace', 'move_symbol_to_namespace',

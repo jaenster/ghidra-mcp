@@ -7,6 +7,7 @@
  * 3. Worker polls for commands, posts results
  */
 
+import type { ApplyChangesetResult, ChangesetOp } from './changeset.js';
 import type {
   ProgramInfo,
   FunctionInfo,
@@ -79,6 +80,7 @@ export type WorkerCommand =
   | SetCustomSignatureCommand
   | CreateStructureCommand
   | BatchRenameCommand
+  | ApplyChangesetCommand
   | ExecuteScriptCommand
   | GetAnalysisHintsCommand
   | FindFunctionsMatchingCommand
@@ -572,6 +574,15 @@ export interface BatchRenameCommand extends BaseCommand {
     }>;
     dryRun?: boolean;
     description?: string;
+  };
+}
+
+export interface ApplyChangesetCommand extends BaseCommand {
+  command: 'apply_changeset';
+  params: {
+    description: string;
+    ops: ChangesetOp[];
+    dryRun?: boolean;
   };
 }
 
@@ -1293,6 +1304,7 @@ export type CommandResultMap = {
   'create_structure': { success: boolean; dataType?: DataTypeInfo };
   'create_funcdef': { success: boolean; name?: string; category?: string; callingConvention?: string | null; effectiveCallingConvention?: string | null; hasUnknownCallingConvention?: boolean | null };
   'batch_rename': BatchResult;
+  'apply_changeset': ApplyChangesetResult;
   'execute_script': ScriptResult;
   'get_analysis_hints': { hints: AnalysisHint[] };
   'find_functions_matching': { functions: FunctionListEntry[] };

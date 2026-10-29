@@ -4,6 +4,7 @@
 
 import type { Session, LogQueryOptions, LogQueryResult } from '@ghidra-mcp/shared';
 import type { WorkerCommand, WorkerResponse, ImportSpecParams } from '@ghidra-mcp/shared/protocol';
+import type { ChangesetOp } from '@ghidra-mcp/shared/changeset';
 import { formatResponse } from './toon.js';
 
 /**
@@ -1341,6 +1342,18 @@ export class GhidraToolHandler {
             }>,
             category: params.category as string | undefined,
             packed: params.packed as boolean | undefined,
+          },
+          timeout,
+        };
+
+      case 'apply_changeset':
+        return {
+          id,
+          command: 'apply_changeset',
+          params: {
+            description: params.description as string,
+            ops: params.ops as ChangesetOp[],
+            dryRun: params.dryRun as boolean | undefined,
           },
           timeout,
         };

@@ -64,6 +64,18 @@ dependencies {
     compileOnly fileTree(dir: "${ghidraInstallDir}/Ghidra/Features/Decompiler/lib", include: '*.jar')
     compileOnly fileTree(dir: "${ghidraInstallDir}/Ghidra/Features/Jython/lib", include: '*.jar')
     compileOnly fileTree(dir: "${ghidraInstallDir}/Ghidra/Features/VersionTracking/lib", include: '*.jar')
+
+    // Unit tests cover the Ghidra-free classes only; Ghidra is not on the test classpath.
+    testImplementation platform('org.junit:junit-bom:5.10.2')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+test {
+    useJUnitPlatform()
+    // The proposal-norm vectors are shared with the TypeScript copy in packages/shared.
+    systemProperty 'changeset.vectors', file('../packages/shared/test/changeset-vectors.json').absolutePath
+    testLogging { events 'failed'; exceptionFormat 'full' }
 }
 
 application {

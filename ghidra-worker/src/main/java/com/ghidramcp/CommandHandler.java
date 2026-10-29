@@ -111,6 +111,9 @@ public class CommandHandler {
             case "rename_symbol":
                 return handleRenameSymbol(params);
 
+            case "apply_changeset":
+                return new Changeset(this, log.child("Changeset")).apply(params);
+
             case "set_comment":
                 return handleSetComment(params);
 

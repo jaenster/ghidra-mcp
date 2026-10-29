@@ -1,0 +1,308 @@
+{
+  "source": "redivivus-app src/proposals/check.ts + schema.ts at 594f12b",
+  "defHash": [
+    {
+      "dataType": {
+        "name": "D2UnitStrc",
+        "category": "/D2",
+        "size": 16,
+        "type": "structure",
+        "fields": [
+          {
+            "offset": 0,
+            "name": "dwType",
+            "dataType": "DWORD",
+            "size": 4,
+            "comment": null,
+            "bitOffset": null,
+            "bitSize": null
+          },
+          {
+            "offset": 4,
+            "name": "field_0x4",
+            "dataType": "undefined4",
+            "size": 4,
+            "comment": "x"
+          },
+          {
+            "offset": 8,
+            "name": null,
+            "dataType": "D2UnitStrc *",
+            "size": 4,
+            "bitOffset": null,
+            "bitSize": null
+          },
+          {
+            "offset": 12,
+            "name": "nFlagA",
+            "dataType": "int:3",
+            "size": 1,
+            "bitOffset": 0,
+            "bitSize": 3
+          },
+          {
+            "offset": 12,
+            "name": "nFlagB",
+            "dataType": "int:5",
+            "size": 1,
+            "bitOffset": 3,
+            "bitSize": 5
+          }
+        ]
+      },
+      "defHash": "e47c8c68fae2f494"
+    },
+    {
+      "dataType": {
+        "name": "Empty",
+        "category": "/",
+        "size": 0,
+        "type": "structure",
+        "fields": []
+      },
+      "defHash": "14ce5d5c0cf37c53"
+    },
+    {
+      "dataType": {
+        "name": "NoFields",
+        "category": "/X",
+        "size": 1,
+        "type": "union"
+      },
+      "defHash": "cbac87ed37601ee1"
+    },
+    {
+      "dataType": {
+        "name": "Esc\"ape\\Strc",
+        "category": "/Cat/With Space",
+        "size": 2,
+        "type": "structure",
+        "fields": [
+          {
+            "offset": 0,
+            "name": "tab\there\nnew\u0001ctl",
+            "dataType": "char",
+            "size": 1
+          },
+          {
+            "offset": 1,
+            "name": "ümlaut€😀",
+            "dataType": "byte",
+            "size": 1
+          }
+        ]
+      },
+      "defHash": "f14c0be58d47d24e"
+    },
+    {
+      "dataType": {
+        "name": "Big",
+        "category": "/B",
+        "size": 4096,
+        "type": "structure",
+        "fields": [
+          {
+            "offset": 4092,
+            "name": "last",
+            "dataType": "char[4]",
+            "size": 4,
+            "bitOffset": null,
+            "bitSize": null
+          }
+        ],
+        "description": "ignored",
+        "alignment": 4
+      },
+      "defHash": "9a9b24e542918c64"
+    },
+    {
+      "dataType": {},
+      "defHash": "b8537975c3e055a9"
+    }
+  ],
+  "normStorage": [
+    {
+      "in": "Stack[-0x10]",
+      "out": "Stack[-0x10]"
+    },
+    {
+      "in": "Stack[-0x10]:4",
+      "out": "Stack[-0x10]"
+    },
+    {
+      "in": "stack[-0x010]:4",
+      "out": "Stack[-0x10]"
+    },
+    {
+      "in": "Stack[0x4]:4",
+      "out": "Stack[0x4]"
+    },
+    {
+      "in": "Stack[0x00]",
+      "out": "Stack[0x0]"
+    },
+    {
+      "in": "ecx",
+      "out": "ECX"
+    },
+    {
+      "in": "ECX:4",
+      "out": "ECX"
+    },
+    {
+      "in": "eax:1",
+      "out": "EAX"
+    },
+    {
+      "in": "HASH:ABCdef",
+      "out": "HASH:abcdef"
+    },
+    {
+      "in": "hash:12:4",
+      "out": "HASH:12"
+    },
+    {
+      "in": " ESI ",
+      "out": "ESI"
+    },
+    {
+      "in": "EDX:4,EAX:4",
+      "out": "EDX:4,EAX"
+    }
+  ],
+  "normType": [
+    {
+      "in": "D2UnitStrc *",
+      "out": "D2UnitStrc*"
+    },
+    {
+      "in": "D2UnitStrc*",
+      "out": "D2UnitStrc*"
+    },
+    {
+      "in": "  char  [ 16 ] ",
+      "out": "char[16]"
+    },
+    {
+      "in": "int * *",
+      "out": "int**"
+    },
+    {
+      "in": "unsigned   int",
+      "out": "unsigned int"
+    },
+    {
+      "in": "char[16]",
+      "out": "char[16]"
+    },
+    {
+      "in": "",
+      "out": ""
+    },
+    {
+      "in": "undefined4",
+      "out": "undefined4"
+    }
+  ],
+  "normSignature": [
+    {
+      "in": "int ITEMS_GetQuality(D2UnitStrc * pItem)",
+      "out": "int ITEMS_GetQuality(D2UnitStrc*pItem)"
+    },
+    {
+      "in": "int ITEMS_GetQuality ( D2UnitStrc *pItem , int  n )",
+      "out": "int ITEMS_GetQuality(D2UnitStrc*pItem,int n)"
+    },
+    {
+      "in": "void __stdcall f(void)",
+      "out": "void __stdcall f(void)"
+    },
+    {
+      "in": "char * (int a)",
+      "out": "char*(int a)"
+    }
+  ],
+  "normConvention": [
+    {
+      "in": "__stdcall",
+      "out": "stdcall"
+    },
+    {
+      "in": "STDCALL",
+      "out": "stdcall"
+    },
+    {
+      "in": "_fastcall",
+      "out": "fastcall"
+    },
+    {
+      "in": " __thiscall ",
+      "out": "thiscall"
+    },
+    {
+      "in": "unknown",
+      "out": "unknown"
+    },
+    {
+      "in": "",
+      "out": ""
+    }
+  ],
+  "normAddress": [
+    {
+      "in": "0x00401000",
+      "out": "0x00401000"
+    },
+    {
+      "in": "00401000",
+      "out": "0x00401000"
+    },
+    {
+      "in": "0x401000",
+      "out": "0x00401000"
+    },
+    {
+      "in": "0X0",
+      "out": "0x00000000"
+    },
+    {
+      "in": "0",
+      "out": "0x00000000"
+    },
+    {
+      "in": "0x0000000100401000",
+      "out": "0x100401000"
+    },
+    {
+      "in": "ABCDEF12",
+      "out": "0xabcdef12"
+    }
+  ],
+  "addrEq": [
+    {
+      "a": "0x401000",
+      "b": "00401000",
+      "out": true
+    },
+    {
+      "a": "0x401000",
+      "b": "0x401001",
+      "out": false
+    },
+    {
+      "a": "0xZZ",
+      "b": "0x0",
+      "out": false
+    },
+    {
+      "a": "",
+      "b": "0x0",
+      "out": false
+    },
+    {
+      "a": "0x0000000100401000",
+      "b": "100401000",
+      "out": true
+    }
+  ]
+}

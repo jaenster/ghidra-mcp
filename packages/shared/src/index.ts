@@ -8,3 +8,4 @@ export * from './protocol.js';
 export * from './platform.js';
 export * from './logging.js';
 export * from './tags.js';
+export * from './changeset.js';

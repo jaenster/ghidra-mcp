@@ -1596,6 +1596,42 @@ export const modificationTools: ToolDefinition[] = [
   ),
 
   defineTool(
+    'apply_changeset',
+    'Apply a set of edits as exactly ONE Ghidra transaction, all or nothing: the transaction is named ' +
+    'by description, every op\'s expect is checked inside it before anything changes, and any ' +
+    'mismatch or failure rolls the whole transaction back and reports per-op errors. Nothing is ' +
+    'checked in to the server; call commit separately. Refused on read-only and version-following ' +
+    'sessions. Ops are the Redivivus proposal ops without program (the session decides): ' +
+    'rename_function {address, expect:{name}, name}; rename_global {address, expect:{name}, name}; ' +
+    'rename_local {function, storage, expect:{name}, name}; retype_local {function, storage, expect:{type}, type}; ' +
+    'set_prototype {address, expect:{signature, callingConvention}, signature, callingConvention}; ' +
+    'set_global_type {address, expect:{type, size}, type}; ' +
+    'struct_field {typePath, offset, expect:{name, type, defHash}, name?, type?}. ' +
+    'storage is as get_function_info prints it ("Stack[-0x10]", "ECX"; a ":4" size may be left out). ' +
+    'expect values are compared with get_function_info / get_data_at_address / get_data_type, ' +
+    'whitespace around * not mattering. defHash is the first 16 hex digits of sha256 over the ' +
+    'canonical JSON of {name, category, size, fields:[[offset, name, dataType, size, bitOffset, bitSize]]} ' +
+    'from get_data_type (keys sorted, no whitespace). Returns {ok, dryRun, transactionId?, applied:[{index, op, before, after}], errors?}.',
+    {
+      ...sessionIdProp,
+      description: {
+        type: 'string',
+        description: 'The transaction\'s name, e.g. "Proposal #12: name the item quality getter"',
+      },
+      ops: {
+        type: 'array',
+        description: '1 to 20 ops, applied in order; two ops on the same target are refused',
+        items: { type: 'object' },
+      },
+      dryRun: {
+        type: 'boolean',
+        description: 'Check and apply inside a transaction that is always rolled back; report what would change (default: false)',
+      },
+    },
+    ['description', 'ops']
+  ),
+
+  defineTool(
     'batch_rename',
     'Rename multiple symbols at once. Supports dry-run mode.',
     {
