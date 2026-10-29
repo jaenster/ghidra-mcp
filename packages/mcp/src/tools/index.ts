@@ -10,6 +10,7 @@
  */
 
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
+import { CHANGESET_MAX_OPS } from '@ghidra-mcp/shared/changeset';
 
 // =============================================================================
 // Tool Definition Helper
@@ -1620,7 +1621,7 @@ export const modificationTools: ToolDefinition[] = [
       },
       ops: {
         type: 'array',
-        description: '1 to 20 ops, applied in order; two ops on the same target are refused',
+        description: `1 to ${CHANGESET_MAX_OPS} ops, applied in order; two ops on the same target are refused`,
         items: { type: 'object' },
       },
       dryRun: {

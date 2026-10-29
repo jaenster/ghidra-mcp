@@ -1,5 +1,6 @@
 {
-  "source": "redivivus-app src/proposals/check.ts + schema.ts at 594f12b",
+  "source": "redivivus-app src/proposals/check.ts + schema.ts at 594f12b; maxOps from schema.ts MAX_OPS",
+  "maxOps": 250,
   "defHash": [
     {
       "dataType": {

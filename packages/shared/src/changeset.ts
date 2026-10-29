@@ -34,7 +34,13 @@ export const CHANGESET_OP_KINDS: readonly ChangesetOpKind[] = [
   'rename_function', 'rename_global', 'rename_local', 'retype_local', 'set_prototype', 'set_global_type', 'struct_field',
 ];
 
-export const CHANGESET_MAX_OPS = 20;
+/** The Redivivus proposal cap (redivivus-app schema.ts MAX_OPS); held to changeset-vectors.json maxOps. */
+export const CHANGESET_MAX_OPS = 250;
+
+/** apply_changeset's worker timeout when the caller sets none: every op is a check, an edit and a re-read. */
+export function changesetTimeoutMs(opCount: number): number {
+  return Math.max(60_000, opCount * 3_000);
+}
 
 export interface ChangesetApplied {
   index: number;

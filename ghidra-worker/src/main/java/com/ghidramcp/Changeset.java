@@ -35,7 +35,8 @@ import java.util.Set;
  * are not repeated here.
  */
 public class Changeset {
-    private static final int MAX_OPS = 20;
+    /** The Redivivus proposal cap (schema.ts MAX_OPS); held to changeset-vectors.json maxOps. */
+    static final int MAX_OPS = 250;
     private static final int MAX_DESCRIPTION = 500;
 
     private final CommandHandler handler;

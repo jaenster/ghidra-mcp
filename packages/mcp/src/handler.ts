@@ -4,7 +4,7 @@
 
 import type { Session, LogQueryOptions, LogQueryResult } from '@ghidra-mcp/shared';
 import type { WorkerCommand, WorkerResponse, ImportSpecParams } from '@ghidra-mcp/shared/protocol';
-import type { ChangesetOp } from '@ghidra-mcp/shared/changeset';
+import { changesetTimeoutMs, type ChangesetOp } from '@ghidra-mcp/shared/changeset';
 import { formatResponse } from './toon.js';
 
 /**
@@ -1355,7 +1355,8 @@ export class GhidraToolHandler {
             ops: params.ops as ChangesetOp[],
             dryRun: params.dryRun as boolean | undefined,
           },
-          timeout,
+          // One transaction over up to CHANGESET_MAX_OPS ops outlasts the default command timeout.
+          timeout: timeout ?? changesetTimeoutMs(Array.isArray(params.ops) ? params.ops.length : 0),
         };
 
       case 'batch_rename':

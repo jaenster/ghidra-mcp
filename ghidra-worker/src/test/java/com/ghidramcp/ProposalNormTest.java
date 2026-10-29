@@ -31,6 +31,11 @@ class ProposalNormTest {
     }
 
     @Test
+    void maxOps() {
+        assertEquals(vectors.get("maxOps").getAsInt(), Changeset.MAX_OPS, "Changeset.MAX_OPS matches the proposal cap");
+    }
+
+    @Test
     void defHash() {
         for (JsonElement c : cases("defHash")) {
             JsonObject o = c.getAsJsonObject();

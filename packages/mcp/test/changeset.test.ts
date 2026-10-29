@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
-  addrEq, defHash, normAddress, normConvention, normSignature, normStorage, normType,
+  addrEq, CHANGESET_MAX_OPS, changesetTimeoutMs, defHash, normAddress, normConvention, normSignature, normStorage, normType,
 } from '@ghidra-mcp/shared/changeset';
 import type { WorkerCommand } from '@ghidra-mcp/shared/protocol';
 import { GhidraToolHandler, type ToolHandlerContext, getToolByName } from '../src/index.js';
@@ -10,6 +10,10 @@ import { GhidraToolHandler, type ToolHandlerContext, getToolByName } from '../sr
 const vectors = JSON.parse(readFileSync(new URL('../../shared/test/changeset-vectors.json', import.meta.url), 'utf8'));
 
 describe('changeset normalisers match the proposal checker', () => {
+  it('op cap', () => {
+    expect(CHANGESET_MAX_OPS).toBe(vectors.maxOps);
+    expect(getToolByName('apply_changeset')!.inputSchema.properties.ops.description).toContain(`1 to ${vectors.maxOps} ops`);
+  });
   it('defHash', async () => {
     for (const c of vectors.defHash) expect(await defHash(c.dataType)).toBe(c.defHash);
   });
