@@ -452,6 +452,22 @@ describe('no intel about the server', () => {
     }
   });
 
+  it('reports a lost Ghidra Server connection as unavailable, not as not found', async () => {
+    const shown = 'Error: The Ghidra server is temporarily unavailable (ghidra_server_unavailable); retry in a minute.';
+    // A restarted server: the dead stub's message says "no such", which is not a missing symbol.
+    for (const daemon of [
+      'Error: ghidra.framework.model.DomainObjectException: java.rmi.NoSuchObjectException: no such object in table',
+      'Error: Not connected to repository server',
+      'Error: ghidra_server_unavailable: the connection to the Ghidra Server was lost and could not be restored (ConnectException: Connection refused)',
+    ]) {
+      const { upstream, gateway } = makeGateway();
+      upstream.failWith = daemon;
+      const res = await gateway.callTool(ALICE, 'list_functions', { limit: 5 });
+      expect(res.isError).toBe(true);
+      expect(res.content[0].text).toBe(shown);
+    }
+  });
+
   it('the tool list names no path, repository or session', async () => {
     const { gateway } = makeGateway();
     const text = JSON.stringify(gateway.listTools());

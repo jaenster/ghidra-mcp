@@ -3,6 +3,7 @@
  */
 
 import type { Session, LogQueryOptions, LogQueryResult } from '@ghidra-mcp/shared';
+import { markServerUnavailable } from '@ghidra-mcp/shared';
 import type { WorkerCommand, WorkerResponse, ImportSpecParams } from '@ghidra-mcp/shared/protocol';
 import { changesetTimeoutMs, type ChangesetOp } from '@ghidra-mcp/shared/changeset';
 import { formatResponse } from './toon.js';
@@ -654,7 +655,7 @@ export class GhidraToolHandler {
     const response = await this.context.sendCommand(sessionId, command);
 
     if (!response.success) {
-      throw new Error(response.error?.message || 'Command failed');
+      throw new Error(markServerUnavailable(response.error?.message || 'Command failed'));
     }
 
     // For execute_script: try to parse JSON output so it gets formatted (TOON/JSON)

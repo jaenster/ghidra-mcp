@@ -20,6 +20,7 @@ import type {
   WorkerResponse,
   WorkerRegistration,
   WorkerHeartbeat,
+  WorkerServerHealth,
   WORKER_STARTUP_TIMEOUT,
   DEFAULT_COMMAND_TIMEOUT,
 } from '@ghidra-mcp/shared/protocol';
@@ -48,6 +49,7 @@ interface WorkerState {
     activeThreads: string[];
     currentCommands: Record<string, string>;
   };
+  server?: WorkerServerHealth;
 }
 
 interface PendingCommand {
@@ -156,11 +158,30 @@ export class WorkerPool {
     // the client's next query. Make the threshold configurable so long runs don't
     // false-reap idle workers.
     const staleMs = Number(process.env.GHIDRA_MCP_HEARTBEAT_STALE_MS) || 60000;
+    const serverMs = serverUnhealthyMs();
     for (const [workerId, state] of this.workers) {
       if (state.status === 'stopped' || state.status === 'stopping') continue;
       if (state.lastHeartbeat && now - state.lastHeartbeat > staleMs) {
         console.log(`[WorkerPool] worker ${workerId} heartbeat stale (>${Math.round((now - state.lastHeartbeat) / 1000)}s)`);
         this.markWorkerDead(workerId, null, null);
+        continue;
+      }
+      if (shouldReplaceForServer(state.server, now, serverMs)) {
+        // The worker could not restore its Ghidra Server connection on its own. Replace it
+        // rather than let it answer every call with an error; the session respawns it on
+        // the next call. A worker holding edits that are not checked in never qualifies.
+        console.log(`[WorkerPool] worker ${workerId} lost its Ghidra Server connection for `
+          + `${Math.round((now - (state.server?.unhealthySince ?? now)) / 1000)}s (${state.server?.error ?? 'no detail'}); replacing it`);
+        this.log?.warn(`Replacing worker ${workerId}: Ghidra Server connection not restored (${state.server?.error ?? 'no detail'})`);
+        const handle = state.handle;
+        this.markWorkerDead(workerId, null, null);
+        if (handle) {
+          this.getLauncher()
+            .then((l) => l.stop(handle, true))
+            .catch((e) => console.warn(`[WorkerPool] stop ${workerId} failed: ${(e as Error).message}`));
+        } else if (typeof state.pid === 'number') {
+          try { process.kill(state.pid, 'SIGKILL'); } catch { /* already gone */ }
+        }
       }
     }
   }
@@ -262,6 +283,8 @@ export class WorkerPool {
       '-Duser.language=en',
       '-Duser.country=US',
       `-Dghidra.mcp.decompiler.threads=${process.env.GHIDRA_MCP_DECOMPILER_THREADS ?? '8'}`,
+      // How often a server session checks its Ghidra Server connection; 0 turns it off.
+      `-Dghidra.mcp.server.probeMs=${process.env.GHIDRA_MCP_SERVER_PROBE_MS ?? '30000'}`,
       '-cp', classpath,
       'com.ghidramcp.Worker',
       '--worker-id', workerId,
@@ -589,6 +612,8 @@ export class WorkerPool {
       state.threads = heartbeat.threads;
     }
 
+    state.server = heartbeat.server;
+
     // Store dirty tracking info from worker
     if (heartbeat.hasDirty && heartbeat.dirtySummary) {
       (state as any).dirtySummary = heartbeat.dirtySummary;
@@ -780,4 +805,20 @@ export function followVersionsMs(env: NodeJS.ProcessEnv = process.env): number {
   if (!raw) return 0;
   const ms = Number(raw);
   return Number.isFinite(ms) && ms > 0 ? Math.floor(ms) : 0;
+}
+
+/** How long a worker may report a lost Ghidra Server connection before it is replaced. */
+export function serverUnhealthyMs(env: NodeJS.ProcessEnv = process.env): number {
+  const v = Number(env.GHIDRA_MCP_SERVER_UNHEALTHY_MS);
+  return Number.isFinite(v) && v > 0 ? v : 180_000;
+}
+
+/**
+ * Whether a worker's reported server health means it should be replaced: unhealthy for
+ * longer than thresholdMs, and nothing to lose by replacing it.
+ */
+export function shouldReplaceForServer(server: WorkerServerHealth | undefined, now: number, thresholdMs: number): boolean {
+  if (!server || server.healthy !== false || server.replaceable !== true) return false;
+  if (typeof server.unhealthySince !== 'number') return false;
+  return now - server.unhealthySince > thresholdMs;
 }

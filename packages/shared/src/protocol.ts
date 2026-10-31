@@ -1414,6 +1414,21 @@ export interface WorkerHeartbeat {
     activeThreads: string[];
     currentCommands: Record<string, string>;
   };
+  /** The worker's own view of its Ghidra Server connection (server sessions only) */
+  server?: WorkerServerHealth;
+}
+
+/** What a server-backed worker reports about its Ghidra Server connection. */
+export interface WorkerServerHealth {
+  /** False after a probe or a command failed to restore the connection */
+  healthy: boolean;
+  error?: string;
+  /** When it last turned unhealthy (epoch ms) */
+  unhealthySince?: number;
+  lastProbeAt?: number;
+  lastRecoveredAt?: number;
+  /** True when a new worker would lose nothing: read-only, or no edits that are not checked in */
+  replaceable: boolean;
 }
 
 // =============================================================================

@@ -5,6 +5,7 @@
  */
 
 import { formatResponse } from '@ghidra-mcp/mcp';
+import { isServerUnavailable } from '@ghidra-mcp/shared';
 import { DENIED_RESPONSE_KEYS, EXPOSED_TOOLS, PUBLIC_PROGRAM_NAMES, type PublicProgram } from './allowlist.js';
 import { stripResponseKeys } from './public-tools.js';
 import { Redactor } from './redact.js';
@@ -156,6 +157,8 @@ export class Gateway {
 
 /** The class of a daemon error, for the audit line. */
 function errorClass(text: string): string {
+  // First: "no such object in table" is a dead RMI stub, not a missing symbol.
+  if (isServerUnavailable(text)) return 'server_unavailable';
   if (/not found|no such|does not exist|no function|unknown (function|symbol|address|data type)/i.test(text)) return 'not_found';
   if (/timed? ?out|timeout/i.test(text)) return 'timeout';
   if (/invalid|must be|cannot parse|could not parse|malformed|out of range|required|expected/i.test(text)) return 'invalid';
@@ -165,6 +168,7 @@ function errorClass(text: string): string {
 /** A message that says what kind of failure happened and nothing about the daemon. */
 export function publicError(daemonText: string): string {
   switch (errorClass(daemonText)) {
+    case 'server_unavailable': return 'The Ghidra server is temporarily unavailable (ghidra_server_unavailable); retry in a minute.';
     case 'not_found': return 'Not found in this program.';
     case 'timeout': return 'The call took too long; narrow it and try again.';
     case 'invalid': return 'Invalid arguments for this tool.';

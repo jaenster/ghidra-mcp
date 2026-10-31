@@ -20,6 +20,7 @@
   },
   "dependencies": {
     "@ghidra-mcp/mcp": "workspace:*",
+    "@ghidra-mcp/shared": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.0.0"
   },
   "devDependencies": {
