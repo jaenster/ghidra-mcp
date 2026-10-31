@@ -3,14 +3,9 @@ package com.ghidramcp;
 import com.ghidramcp.logging.Logger;
 import com.ghidramcp.operations.ProjectOps;
 
-import ghidra.app.decompiler.DecompInterface;
-import ghidra.program.flatapi.FlatProgramAPI;
-import ghidra.program.model.listing.Program;
-
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.function.Supplier;
 
 /**
  * Keeps a read-only server session on the latest version of its program.
@@ -24,17 +19,16 @@ import java.util.function.Supplier;
  */
 public final class VersionFollower {
     private final GhidraEngine engine;
-    /** The dispatcher is replaced when the worker reconnects to the daemon; always fence on the current one. */
-    private final Supplier<CommandDispatcher> dispatcher;
+    private final ProgramReloader reloader;
     private final String programPath;
     private final long intervalMs;
     private final Logger log;
     private final ScheduledExecutorService timer;
 
-    public VersionFollower(GhidraEngine engine, Supplier<CommandDispatcher> dispatcher, String programPath,
+    public VersionFollower(GhidraEngine engine, ProgramReloader reloader, String programPath,
                            long intervalMs, Logger log) {
         this.engine = engine;
-        this.dispatcher = dispatcher;
+        this.reloader = reloader;
         this.programPath = programPath;
         this.intervalMs = intervalMs;
         this.log = log;
@@ -77,52 +71,8 @@ public final class VersionFollower {
         log.info("Version " + latest + " of " + programPath + " is on the server (serving "
                 + served + "); loading it");
         long started = System.currentTimeMillis();
-        // Load outside the fence: this is the slow part, and commands keep running on the
-        // old version meanwhile.
-        Program next = ops.openReadOnlyVersion(programPath, latest);
-        DecompInterface decomp;
-        try {
-            decomp = ops.newDecompiler(next);
-        } catch (RuntimeException e) {
-            next.release(ctx);
-            throw e;
-        }
-        FlatProgramAPI api = new FlatProgramAPI(next);
-
-        GhidraContext.Replaced[] replaced = new GhidraContext.Replaced[1];
-        dispatcher.get().runExclusive(() -> {
-            replaced[0] = ctx.replaceProgram(programPath, next, api, decomp);
-            ctx.setServedVersion(latest, System.currentTimeMillis());
-        });
-        release(replaced[0]);
+        reloader.reload(programPath, latest, true);
         log.info("Now serving version " + latest + " of " + programPath + " (loaded in "
                 + (System.currentTimeMillis() - started) + " ms)");
-    }
-
-    private void release(GhidraContext.Replaced old) {
-        GhidraContext ctx = engine.getContext();
-        if (old == null) {
-            return;
-        }
-        if (old.pool != null) {
-            old.pool.shutdown();
-        }
-        if (old.tracker != null) {
-            try {
-                old.tracker.detach();
-            } catch (Exception e) {
-                log.warn("Detaching the old dirty tracker failed: " + e.getMessage());
-            }
-        }
-        if (old.decompiler != null) {
-            try {
-                old.decompiler.dispose();
-            } catch (Exception e) {
-                log.warn("Disposing the old decompiler failed: " + e.getMessage());
-            }
-        }
-        if (old.program != null && !old.program.isClosed()) {
-            old.program.release(ctx);
-        }
     }
 }

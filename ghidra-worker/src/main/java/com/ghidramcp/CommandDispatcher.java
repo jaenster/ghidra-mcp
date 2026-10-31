@@ -32,6 +32,7 @@ public class CommandDispatcher {
     private final ExecutorService readPool;
     private final CommandHandler handler;
     private final Logger log;
+    private volatile ServerRecovery recovery;
 
     // Track which thread is running which command (for heartbeat/dashboard)
     private final ConcurrentHashMap<String, String> activeThreadCommands = new ConcurrentHashMap<>();
@@ -95,37 +96,71 @@ public class CommandDispatcher {
         }
 
         if (READ_COMMANDS.contains(commandType)) {
-            return readPool.submit(() -> {
-                fence.readLock().lock();
-                String thread = Thread.currentThread().getName();
-                activeThreadCommands.put(thread, commandType);
-                long start = System.currentTimeMillis();
-                log.info("CMD START [" + thread + "] " + commandType + " " + truncateParams(params));
-                try {
-                    JsonObject result = handler.handle(commandType, params);
-                    long elapsed = System.currentTimeMillis() - start;
-                    String resultJson = gson.toJson(result);
-                    log.info("CMD DONE  [" + thread + "] " + commandType + " " + elapsed + "ms result=" + resultJson.length() + "ch");
-                    return result;
-                } catch (Exception e) {
-                    long elapsed = System.currentTimeMillis() - start;
-                    log.error("CMD ERROR [" + thread + "] " + commandType + " " + elapsed + "ms: " + e.getMessage());
-                    throw e;
-                } finally {
-                    activeThreadCommands.remove(thread);
-                    fence.readLock().unlock();
-                }
-            });
+            return readPool.submit(() -> runRecovering(commandType, params, false));
         } else {
             // Write command — execute synchronously under write lock
             CompletableFuture<JsonObject> future = new CompletableFuture<>();
-            fence.writeLock().lock();
-            String thread = Thread.currentThread().getName();
-            activeThreadCommands.put(thread, commandType);
-            long start = System.currentTimeMillis();
-            log.info("CMD START [" + thread + "] " + commandType + " (write) " + truncateParams(params));
             try {
-                JsonObject result = handler.handle(commandType, params);
+                future.complete(runRecovering(commandType, params, true));
+            } catch (Exception e) {
+                future.completeExceptionally(e);
+            }
+            return future;
+        }
+    }
+
+    /**
+     * Run a command, and when it fails because the Ghidra Server connection died, restore
+     * the connection and run it once more. The recovery runs with no lock held: it swaps
+     * programs under the write lock itself. A write is only rerun when the failed call
+     * cannot have reached the server; otherwise it reports the loss and leaves the retry
+     * to the caller.
+     */
+    private JsonObject runRecovering(String commandType, JsonObject params, boolean write) throws Exception {
+        ServerRecovery r = recovery;
+        long seen = r != null ? r.generation() : 0;
+        try {
+            return runLocked(commandType, params, write);
+        } catch (Exception e) {
+            if (r == null || !ServerConnection.isLoss(e)) {
+                throw e;
+            }
+            if (e instanceof ServerConnection.ServerUnavailableException) {
+                throw e;
+            }
+            if (write && !ServerConnection.isRetrySafe(e)) {
+                r.recover(seen, e);
+                throw new ServerConnection.ServerUnavailableException(
+                        "the connection to the Ghidra Server dropped during " + commandType + " ("
+                                + ServerConnection.describe(e) + "). It has been reconnected; check the "
+                                + "result before running it again.", e);
+            }
+            r.recover(seen, e);
+            log.info("Retrying " + commandType + " after restoring the Ghidra Server connection");
+            try {
+                return runLocked(commandType, params, write);
+            } catch (Exception again) {
+                if (ServerConnection.isLoss(again)) {
+                    throw new ServerConnection.ServerUnavailableException(
+                            "the connection to the Ghidra Server failed again after reconnecting ("
+                                    + ServerConnection.describe(again) + ")", again);
+                }
+                throw again;
+            }
+        }
+    }
+
+    private JsonObject runLocked(String commandType, JsonObject params, boolean write) throws Exception {
+        var lock = write ? fence.writeLock() : fence.readLock();
+        lock.lock();
+        String thread = Thread.currentThread().getName();
+        String mode = write ? " (write)" : "";
+        activeThreadCommands.put(thread, commandType);
+        long start = System.currentTimeMillis();
+        log.info("CMD START [" + thread + "] " + commandType + mode + " " + truncateParams(params));
+        try {
+            JsonObject result = handler.handle(commandType, params);
+            if (write) {
                 // Ghidra delivers change records on a 500 ms timer, not when the
                 // transaction ends, so a write that simply returns leaves its own change
                 // invisible for up to half a second. That timing - not a gap in what the
@@ -135,20 +170,24 @@ public class CommandDispatcher {
                 // wait for exactly its own change instead of guessing.
                 flushChangeEvents();
                 stampChangeSeq(result);
-                long elapsed = System.currentTimeMillis() - start;
-                String resultJson = gson.toJson(result);
-                log.info("CMD DONE  [" + thread + "] " + commandType + " (write) " + elapsed + "ms result=" + resultJson.length() + "ch");
-                future.complete(result);
-            } catch (Exception e) {
-                long elapsed = System.currentTimeMillis() - start;
-                log.error("CMD ERROR [" + thread + "] " + commandType + " (write) " + elapsed + "ms: " + e.getMessage());
-                future.completeExceptionally(e);
-            } finally {
-                activeThreadCommands.remove(thread);
-                fence.writeLock().unlock();
             }
-            return future;
+            long elapsed = System.currentTimeMillis() - start;
+            String resultJson = gson.toJson(result);
+            log.info("CMD DONE  [" + thread + "] " + commandType + mode + " " + elapsed + "ms result=" + resultJson.length() + "ch");
+            return result;
+        } catch (Exception e) {
+            long elapsed = System.currentTimeMillis() - start;
+            log.error("CMD ERROR [" + thread + "] " + commandType + mode + " " + elapsed + "ms: " + e.getMessage());
+            throw e;
+        } finally {
+            activeThreadCommands.remove(thread);
+            lock.unlock();
         }
+    }
+
+    /** Install the server recovery; commands that lose the connection then reconnect and retry. */
+    public void setRecovery(ServerRecovery recovery) {
+        this.recovery = recovery;
     }
 
     /**

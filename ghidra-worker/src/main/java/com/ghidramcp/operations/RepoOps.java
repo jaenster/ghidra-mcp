@@ -838,8 +838,12 @@ public class RepoOps {
 
     private RepositoryServerAdapter requireServer() throws IOException {
         RepositoryServerAdapter server = ctx.getServerAdapter();
-        if (server == null || !server.isConnected()) {
+        if (server == null) {
             throw new IOException("Not connected to a Ghidra Server");
+        }
+        if (!server.isConnected()) {
+            // The connection dropped (a server restart): the dispatcher reconnects on this and retries.
+            throw new ghidra.framework.client.NotConnectedException("Not connected to a Ghidra Server");
         }
         return server;
     }

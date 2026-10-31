@@ -470,8 +470,12 @@ public class ProjectOps {
 
     private ghidra.framework.client.RepositoryServerAdapter requireServer() throws IOException {
         ghidra.framework.client.RepositoryServerAdapter server = ctx.getServerAdapter();
-        if (server == null || !server.isConnected()) {
+        if (server == null) {
             throw new IOException("Not connected to a Ghidra Server");
+        }
+        if (!server.isConnected()) {
+            // The connection dropped (a server restart): the dispatcher reconnects on this and retries.
+            throw new ghidra.framework.client.NotConnectedException("Not connected to a Ghidra Server");
         }
         return server;
     }
@@ -772,8 +776,12 @@ public class ProjectOps {
 
     public String[] listRepos() throws Exception {
         ghidra.framework.client.RepositoryServerAdapter server = ctx.getServerAdapter();
-        if (server == null || !server.isConnected()) {
+        if (server == null) {
             throw new Exception("Not connected to a Ghidra Server");
+        }
+        if (!server.isConnected()) {
+            // The connection dropped (a server restart): the dispatcher reconnects on this and retries.
+            throw new ghidra.framework.client.NotConnectedException("Not connected to a Ghidra Server");
         }
         return server.getRepositoryNames();
     }

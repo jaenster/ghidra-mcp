@@ -24,6 +24,8 @@ export interface TestGhidraServer {
   daemonEnv: Record<string, string>;
   repoDir: string;
   stop(): Promise<void>;
+  /** Stop and start the server process on the same repositories and port, like a pod restart. */
+  restart(): Promise<void>;
 }
 
 export const TEST_SERVER_PORT = 13700;
@@ -90,16 +92,9 @@ export async function startTestGhidraServer(port = TEST_SERVER_PORT): Promise<Te
     .map((v) => v.replace('${ghidra_home}', home))
     .join(path.delimiter);
   const java = process.env.JAVA_HOME ? path.join(process.env.JAVA_HOME, 'bin', 'java') : 'java';
-  const proc = child_process.spawn(java, [
-    '-Xmx768M', '-Djava.net.preferIPv4Stack=true', `-Djava.io.tmpdir=${root}`, '-Djava.awt.headless=true',
-    `-Dclasspath_frag=${frag}`, '-cp', classpath,
-    'ghidra.server.remote.GhidraServer', '-a0', '-ip', '127.0.0.1', `-p${port}`, repoDir,
-  ], { cwd: home, stdio: ['ignore', 'pipe', 'pipe'] });
+  let proc!: child_process.ChildProcess;
   let log = '';
-  proc.stdout?.on('data', (d) => { log += d.toString(); if (process.env.DEBUG) process.stdout.write(`[ghidra-server] ${d}`); });
-  proc.stderr?.on('data', (d) => { log += d.toString(); if (process.env.DEBUG) process.stderr.write(`[ghidra-server] ${d}`); });
 
-  const pid = proc.pid!;
   const stop = async (): Promise<void> => {
     if (proc.exitCode !== null || proc.signalCode !== null) return;
     const exited = new Promise<void>((resolve) => proc.once('exit', () => resolve()));
@@ -109,16 +104,31 @@ export async function startTestGhidraServer(port = TEST_SERVER_PORT): Promise<Te
     clearTimeout(timer);
   };
 
-  const deadline = Date.now() + 120_000;
-  for (;;) {
-    if (proc.exitCode !== null) throw new Error(`Ghidra Server exited early:\n${log.slice(-2000)}`);
-    if (await portOpen(port) && /Registered remote|Server listening|ready/i.test(log)) break;
-    if (Date.now() > deadline) {
-      await stop();
-      throw new Error(`Ghidra Server did not come up:\n${log.slice(-2000)}`);
+  // Start the server process on the given repositories and wait until it accepts
+  // connections. Called again by restart() on the same directory and port.
+  const launch = async (): Promise<void> => {
+    log = '';
+    proc = child_process.spawn(java, [
+      '-Xmx768M', '-Djava.net.preferIPv4Stack=true', `-Djava.io.tmpdir=${root}`, '-Djava.awt.headless=true',
+      `-Dclasspath_frag=${frag}`, '-cp', classpath,
+      'ghidra.server.remote.GhidraServer', '-a0', '-ip', '127.0.0.1', `-p${port}`, repoDir,
+    ], { cwd: home, stdio: ['ignore', 'pipe', 'pipe'] });
+    proc.stdout?.on('data', (d) => { log += d.toString(); if (process.env.DEBUG) process.stdout.write(`[ghidra-server] ${d}`); });
+    proc.stderr?.on('data', (d) => { log += d.toString(); if (process.env.DEBUG) process.stderr.write(`[ghidra-server] ${d}`); });
+
+    const deadline = Date.now() + 120_000;
+    for (;;) {
+      if (proc.exitCode !== null) throw new Error(`Ghidra Server exited early:\n${log.slice(-2000)}`);
+      if (await portOpen(port) && /Registered remote|Server listening|ready/i.test(log)) break;
+      if (Date.now() > deadline) {
+        await stop();
+        throw new Error(`Ghidra Server did not come up:\n${log.slice(-2000)}`);
+      }
+      await new Promise((r) => setTimeout(r, 500));
     }
-    await new Promise((r) => setTimeout(r, 500));
-  }
+  };
+
+  await launch();
 
   // svrAdmin only accepts a directory the server has initialised. The command is queued
   // there and the running server applies it on its next poll; wait for the user to exist.
@@ -147,5 +157,12 @@ export async function startTestGhidraServer(port = TEST_SERVER_PORT): Promise<Te
     },
     repoDir,
     stop,
+    restart: async () => {
+      await stop();
+      // The RMI ports linger briefly after the process exits.
+      const freeBy = Date.now() + 30_000;
+      while (!(await portFree(port)) && Date.now() < freeBy) await new Promise((r) => setTimeout(r, 250));
+      await launch();
+    },
   };
 }

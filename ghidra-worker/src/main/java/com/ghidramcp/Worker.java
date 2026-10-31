@@ -43,6 +43,9 @@ public class Worker {
     // Poll interval for following the latest server version (read-only server sessions); 0 = off.
     private final long followVersionsMs;
     private VersionFollower follower;
+    private ServerRecovery recovery;
+    /** How often a server session probes its Ghidra Server connection; 0 = never. */
+    private static final long SERVER_PROBE_MS = Long.getLong("ghidra.mcp.server.probeMs", 30_000L);
 
     private GhidraEngine engine;
     private DaemonClient client;
@@ -166,11 +169,23 @@ public class Worker {
             CommandDispatcher dispatcher = new CommandDispatcher(handler, log.child("Dispatcher"));
             dispatcherRef.set(dispatcher);
 
+            ProgramReloader reloader = new ProgramReloader(engine, dispatcherRef::get, log.child("ProgramReloader"));
+            String primaryPath = engine.getContext().getActiveProgramPath();
+            if (serverHostPort != null) {
+                recovery = new ServerRecovery(engine, reloader,
+                        engine.getContext().getServedVersion() != null ? primaryPath : null,
+                        log.child("ServerRecovery"));
+                dispatcher.setRecovery(recovery);
+                if (SERVER_PROBE_MS > 0) {
+                    recovery.start(SERVER_PROBE_MS);
+                }
+            }
+
             if (followVersionsMs > 0) {
-                String followed = engine.getContext().getActiveProgramPath();
+                String followed = primaryPath;
                 if (readOnly && serverProgram != null && followed != null
                         && engine.getContext().getServedVersion() != null) {
-                    follower = new VersionFollower(engine, dispatcherRef::get, followed, followVersionsMs,
+                    follower = new VersionFollower(engine, reloader, followed, followVersionsMs,
                             log.child("VersionFollower"));
                     follower.start();
                 } else {
@@ -206,6 +221,9 @@ public class Worker {
                 threads.add("currentCommands", currentCommands);
                 JsonObject extra = new JsonObject();
                 extra.add("threads", threads);
+                if (recovery != null) {
+                    extra.add("server", recovery.status());
+                }
                 return extra;
             });
 
@@ -300,6 +318,7 @@ public class Worker {
                                     // Re-register the command handler's and dispatcher's logger
                                     handler = new CommandHandler(engine, log.child("CommandHandler"));
                                     dispatcher = new CommandDispatcher(handler, log.child("Dispatcher"));
+                                    dispatcher.setRecovery(recovery);
                                     dispatcherRef.set(dispatcher);
 
                                     reconnected = true;
@@ -331,6 +350,9 @@ public class Worker {
             client.stopHeartbeatThread();
             if (follower != null) {
                 follower.stop();
+            }
+            if (recovery != null) {
+                recovery.stop();
             }
             if (engine != null) {
                 engine.close(true);
