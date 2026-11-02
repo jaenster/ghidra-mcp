@@ -53,6 +53,7 @@ public class CommandDispatcher {
         "get_switch_table", "get_undo_history", "get_line_mappings",
         "get_global_variables", "get_data_at_address", "get_symbol_after",
         "get_hexdump", "get_cache_version", "get_dirty_symbols", "get_changes",
+        "get_state_hashes",
         "read_memory", "read_data_value",
         "find_call_path", "find_functions_matching",
         "search", "trace_data_flow", "detect_table",

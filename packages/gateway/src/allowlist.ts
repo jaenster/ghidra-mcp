@@ -162,7 +162,7 @@ export const EXCLUDED_GROUPS: Readonly<Record<string, ExcludedGroup>> = {
   leaky: {
     reason: 'reveal daemon logs, edit history or other programs\' state rather than the pinned program',
     tools: [
-      'get_logs', 'get_changes', 'get_undo_history', 'get_dirty_symbols', 'sync_status',
+      'get_logs', 'get_changes', 'get_state_hashes', 'get_undo_history', 'get_dirty_symbols', 'sync_status',
       'analyze_status', 'query_links', 'list_shared_structures', 'vt_list_matches', 'vt_get_correlators',
     ],
   },

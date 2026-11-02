@@ -140,6 +140,7 @@ export type WorkerCommand =
   | ImportTypeArchiveCommand
   // Change journal
   | GetChangesCommand
+  | GetStateHashesCommand
   // Batch tag command
   | BatchTagSymbolsCommand
   // Symbol navigation
@@ -1265,6 +1266,34 @@ export interface GetChangesCommand extends BaseCommand {
   };
 }
 
+export type StateHashKind = 'functions' | 'types' | 'globals';
+
+/**
+ * Content hashes of what a generator reads, per function, data type and global, computed in
+ * the worker. Two equal hashes mean equal input, whatever the journal said in between.
+ * `addresses` narrows functions and globals; types are always complete when asked for.
+ */
+export interface GetStateHashesCommand extends BaseCommand {
+  command: 'get_state_hashes';
+  params: {
+    kinds?: StateHashKind[];
+    addresses?: string[];
+  };
+}
+
+export interface StateHashesResult {
+  /** The domain file version the session is based on. */
+  programVersion: number;
+  /** Ghidra's modification number; moves on every change, undo and redo included. */
+  modificationNumber: number;
+  /** Journal head when the hashes were taken: every event up to here is reflected. */
+  changeSeq?: number;
+  functions?: Record<string, string>;
+  types?: Record<string, string>;
+  globals?: Record<string, string>;
+  elapsedMs: number;
+}
+
 export type CommandResultMap = {
   'load_program': { loaded: boolean; programInfo?: ProgramInfo };
   'close_program': { closed: boolean };
@@ -1345,6 +1374,7 @@ export type CommandResultMap = {
   'mark_clean': { version: number };
   // Change journal
   'get_changes': { events: ChangeEvent[]; head: number };
+  'get_state_hashes': StateHashesResult;
 };
 
 /** A background auto-analysis job, as analyze and analyze_status report it. */

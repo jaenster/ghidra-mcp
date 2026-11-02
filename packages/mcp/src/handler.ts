@@ -4,7 +4,7 @@
 
 import type { Session, LogQueryOptions, LogQueryResult } from '@ghidra-mcp/shared';
 import { markServerUnavailable } from '@ghidra-mcp/shared';
-import type { WorkerCommand, WorkerResponse, ImportSpecParams } from '@ghidra-mcp/shared/protocol';
+import type { WorkerCommand, WorkerResponse, ImportSpecParams, StateHashKind } from '@ghidra-mcp/shared/protocol';
 import { changesetTimeoutMs, type ChangesetOp } from '@ghidra-mcp/shared/changeset';
 import { formatResponse } from './toon.js';
 
@@ -1851,6 +1851,17 @@ export class GhidraToolHandler {
           params: {
             since: params.since as number | undefined,
             limit: params.limit as number | undefined,
+          },
+          timeout,
+        };
+
+      case 'get_state_hashes':
+        return {
+          id,
+          command: 'get_state_hashes',
+          params: {
+            kinds: params.kinds as StateHashKind[] | undefined,
+            addresses: params.addresses as string[] | undefined,
           },
           timeout,
         };
