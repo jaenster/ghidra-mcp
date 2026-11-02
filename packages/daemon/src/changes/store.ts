@@ -20,6 +20,7 @@ const DEFAULT_CAPACITY = 10_000;
 export class ChangeStore {
   private readonly buffers = new Map<string, ChangeEvent[]>();
   private readonly heads = new Map<string, number>();
+  private readonly epochs = new Map<string, string>();
   private readonly emitter = new EventEmitter();
 
   constructor(private readonly capacity: number = DEFAULT_CAPACITY) {
@@ -28,9 +29,22 @@ export class ChangeStore {
     this.emitter.setMaxListeners(0);
   }
 
-  /** Append a batch from the worker. Out-of-order or replayed batches are ignored. */
+  /**
+   * Append a batch from the worker. Out-of-order or replayed batches are ignored.
+   *
+   * A batch from a different journal epoch replaces the buffer: the worker's journal was
+   * reset (respawned with a fresh project directory), its sequence numbers start again at
+   * 1, and comparing them to the old head would drop every new event as a replay.
+   */
   append(sessionId: string, events: ChangeEvent[]): ChangeEvent[] {
     if (events.length === 0) return [];
+
+    const epoch = events.find((e) => e.epoch)?.epoch;
+    if (epoch !== undefined && this.epochs.get(sessionId) !== epoch) {
+      this.buffers.delete(sessionId);
+      this.heads.delete(sessionId);
+      this.epochs.set(sessionId, epoch);
+    }
 
     const head = this.heads.get(sessionId) ?? 0;
     const fresh = events.filter((e) => e.seq > head).sort((a, b) => a.seq - b.seq);
@@ -46,6 +60,11 @@ export class ChangeStore {
 
     this.emitter.emit(sessionId, fresh);
     return fresh;
+  }
+
+  /** The journal epoch the buffered events belong to; undefined until one is seen. */
+  epoch(sessionId: string): string | undefined {
+    return this.epochs.get(sessionId);
   }
 
   /** The highest sequence this store has seen for a session; 0 if none. */
@@ -86,6 +105,7 @@ export class ChangeStore {
   forget(sessionId: string): void {
     this.buffers.delete(sessionId);
     this.heads.delete(sessionId);
+    this.epochs.delete(sessionId);
     this.emitter.removeAllListeners(sessionId);
   }
 }

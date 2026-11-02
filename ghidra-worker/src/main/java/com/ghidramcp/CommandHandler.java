@@ -375,6 +375,9 @@ public class CommandHandler {
             case "get_changes":
                 return handleGetChanges(params);
 
+            case "get_state_hashes":
+                return handleGetStateHashes(params);
+
             default:
                 throw new UnsupportedOperationException("Unknown command: " + command);
         }
@@ -2321,6 +2324,7 @@ public class CommandHandler {
         if (journal == null) {
             result.add("events", new com.google.gson.JsonArray());
             result.addProperty("head", 0);
+            result.addProperty("epoch", "");
             return result;
         }
 
@@ -2336,6 +2340,62 @@ public class CommandHandler {
         }
         result.add("events", events);
         result.addProperty("head", journal.head());
+        result.addProperty("epoch", journal.epoch());
+        return result;
+    }
+
+    /**
+     * Content hashes of what the generator reads, per function, type and global. A consumer
+     * diffs two of these instead of trusting the journal to have named every change.
+     * `kinds` narrows to functions, types and/or globals; `addresses` narrows functions and
+     * globals to those entry points and addresses.
+     */
+    private JsonObject handleGetStateHashes(JsonObject params) {
+        var program = engine.getProgram();
+        if (program == null) throw new IllegalStateException("No program loaded");
+
+        java.util.Set<String> kinds = new java.util.HashSet<>();
+        if (params.has("kinds") && !params.get("kinds").isJsonNull()) {
+            var k = params.get("kinds");
+            if (k.isJsonArray()) {
+                for (var e : k.getAsJsonArray()) kinds.add(e.getAsString());
+            } else {
+                kinds.add(k.getAsString());
+            }
+        }
+        if (kinds.isEmpty()) kinds.addAll(java.util.List.of("functions", "types", "globals"));
+        for (String k : kinds) {
+            if (!k.equals("functions") && !k.equals("types") && !k.equals("globals")) {
+                throw new IllegalArgumentException("unknown kind '" + k + "' (functions, types, globals)");
+            }
+        }
+
+        java.util.List<ghidra.program.model.address.Address> only = null;
+        if (params.has("addresses") && params.get("addresses").isJsonArray()) {
+            only = new java.util.ArrayList<>();
+            for (var e : params.get("addresses").getAsJsonArray()) {
+                var a = program.getAddressFactory().getAddress(e.getAsString());
+                if (a == null) throw new IllegalArgumentException("bad address '" + e.getAsString() + "'");
+                only.add(a);
+            }
+        }
+
+        long started = System.nanoTime();
+        // Runs under the dispatcher's read fence, so no write lands mid-walk: the hashes and
+        // the journal head below describe one state.
+        StateHasher hasher = new StateHasher(program);
+        JsonObject result = new JsonObject();
+        result.addProperty("programVersion", program.getDomainFile().getVersion());
+        result.addProperty("modificationNumber", program.getModificationNumber());
+        ChangeJournal journal = engine.getContext().getChangeJournal();
+        if (journal != null) {
+            result.addProperty("changeSeq", journal.head());
+            result.addProperty("changeEpoch", journal.epoch());
+        }
+        if (kinds.contains("functions")) result.add("functions", gson.toJsonTree(hasher.functions(only)));
+        if (kinds.contains("types")) result.add("types", gson.toJsonTree(hasher.dataTypes()));
+        if (kinds.contains("globals")) result.add("globals", gson.toJsonTree(hasher.globals(only)));
+        result.addProperty("elapsedMs", (System.nanoTime() - started) / 1_000_000);
         return result;
     }
 

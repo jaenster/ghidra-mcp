@@ -140,6 +140,7 @@ export type WorkerCommand =
   | ImportTypeArchiveCommand
   // Change journal
   | GetChangesCommand
+  | GetStateHashesCommand
   // Batch tag command
   | BatchTagSymbolsCommand
   // Symbol navigation
@@ -1232,8 +1233,14 @@ export interface WorkerError {
  * are diagnostic only: Ghidra flushes change records on a 500 ms timer rather than at
  * commit, so one flush can span several transactions and the stamp is the most recently
  * started one.
+ *
+ * `seq` is only comparable within one `epoch`. A journal that was lost with its worker
+ * starts again at 1 under a new epoch; a consumer seeing a different epoch must treat its
+ * position as void and reconcile, never compare sequence numbers across the two.
  */
 export interface ChangeEvent {
+  /** Identity of the journal's sequence space; absent only from journals written before it. */
+  epoch?: string;
   seq: number;
   mod: number;
   ts: number;
@@ -1245,7 +1252,8 @@ export interface ChangeEvent {
     | 'data.changed'
     | 'ref.added' | 'ref.removed'
     | 'code.added' | 'code.removed'
-    | 'restored';
+    | 'restored'
+    | 'version.committed';
   /** Which index of a consumer's model `key` addresses. */
   target: 'function' | 'global' | 'datatype' | 'program';
   /** Function entry point, global address, or datatype path name. */
@@ -1254,6 +1262,8 @@ export interface ChangeEvent {
   newName?: string;
   txId?: number;
   txDescription?: string;
+  /** For version.committed: the server version the check-in created. */
+  version?: number;
 }
 
 /** Read the durable change journal. `since` is exclusive. */
@@ -1263,6 +1273,36 @@ export interface GetChangesCommand extends BaseCommand {
     since?: number;
     limit?: number;
   };
+}
+
+export type StateHashKind = 'functions' | 'types' | 'globals';
+
+/**
+ * Content hashes of what a generator reads, per function, data type and global, computed in
+ * the worker. Two equal hashes mean equal input, whatever the journal said in between.
+ * `addresses` narrows functions and globals; types are always complete when asked for.
+ */
+export interface GetStateHashesCommand extends BaseCommand {
+  command: 'get_state_hashes';
+  params: {
+    kinds?: StateHashKind[];
+    addresses?: string[];
+  };
+}
+
+export interface StateHashesResult {
+  /** The domain file version the session is based on. */
+  programVersion: number;
+  /** Ghidra's modification number; moves on every change, undo and redo included. */
+  modificationNumber: number;
+  /** Journal head when the hashes were taken: every event up to here is reflected. */
+  changeSeq?: number;
+  /** Epoch of the journal changeSeq belongs to. */
+  changeEpoch?: string;
+  functions?: Record<string, string>;
+  types?: Record<string, string>;
+  globals?: Record<string, string>;
+  elapsedMs: number;
 }
 
 export type CommandResultMap = {
@@ -1344,7 +1384,8 @@ export type CommandResultMap = {
   'get_dirty_symbols': { functions: string[]; dataTypes: string[]; globals: string[]; lastCleanVersion: number };
   'mark_clean': { version: number };
   // Change journal
-  'get_changes': { events: ChangeEvent[]; head: number };
+  'get_changes': { events: ChangeEvent[]; head: number; epoch: string };
+  'get_state_hashes': StateHashesResult;
 };
 
 /** A background auto-analysis job, as analyze and analyze_status report it. */

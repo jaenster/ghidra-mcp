@@ -2518,6 +2518,24 @@ export const advancedTools: ToolDefinition[] = [
   ),
 
   defineTool(
+    'get_state_hashes',
+    'Content hashes of everything a generator reads, per function (keyed by entry point), per data type (by path) and per global (by address), computed inside the worker. Diff two results to find exactly what differs between two states, independent of the change journal - after an undo, a lost journal or any doubt. Returns programVersion, modificationNumber and the journal head (changeSeq) the hashes reflect.',
+    {
+      ...sessionIdProp,
+      kinds: {
+        type: 'array',
+        items: { type: 'string', enum: ['functions', 'types', 'globals'] },
+        description: 'Which maps to return. Default all three.',
+      },
+      addresses: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Only these function entry points and global addresses. Types are unaffected.',
+      },
+    }
+  ),
+
+  defineTool(
     'mark_clean',
     'Mark the current program state as clean, clearing all dirty tracking. Call after a successful reconstruction or extraction.',
     {
