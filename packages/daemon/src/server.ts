@@ -611,6 +611,13 @@ export async function createServer(options: ServerOptions): Promise<{
    * subscriber was away too long - the worker's durable journal is asked instead. If even
    * that cannot answer, the stream says so with a `truncated` event rather than resuming
    * at the live edge, because a silent gap reads exactly like "nothing changed".
+   *
+   * Sequence numbers are only comparable within one journal epoch. A subscriber passes the
+   * epoch its `since` belongs to as `?epoch=`; when the journal's epoch differs (the worker
+   * was respawned and its journal started again), or the journal head is below `since`,
+   * the stream sends `reset` {epoch, previousEpoch, head} and replays the new journal from
+   * the start. The same `reset` is sent mid-stream when live events arrive under a new
+   * epoch. A subscriber must treat `reset` and `truncated` as "my model may be stale".
    */
   app.get('/changes/:sessionId', requireAuth, async (req: Request, res: Response) => {
     const sessionId = sessionManager.resolveSessionId(req.params.sessionId);
@@ -618,6 +625,7 @@ export async function createServer(options: ServerOptions): Promise<{
     const sinceRaw = (req.query.since as string) ?? (typeof lastEventId === 'string' ? lastEventId : undefined);
     let since = Number.parseInt(sinceRaw ?? '0', 10);
     if (!Number.isFinite(since) || since < 0) since = 0;
+    const clientEpoch = typeof req.query.epoch === 'string' && req.query.epoch !== '' ? req.query.epoch : undefined;
 
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
@@ -636,38 +644,64 @@ export async function createServer(options: ServerOptions): Promise<{
     const pending: ChangeEvent[] = [];
     let live = false;
     let delivered = since;
+    let epoch = clientEpoch;
+    const deliver = (e: ChangeEvent) => {
+      if (e.epoch && epoch && e.epoch !== epoch) {
+        write('reset', { epoch: e.epoch, previousEpoch: epoch, head: e.seq });
+        delivered = 0;
+      }
+      if (e.epoch) epoch = e.epoch;
+      if (e.seq <= delivered) return;
+      write('change', e, e.seq);
+      delivered = e.seq;
+    };
     const unsubscribe = changes.subscribe(sessionId, (batch) => {
       if (!live) {
         pending.push(...batch);
         return;
       }
-      for (const e of batch) {
-        if (e.seq <= delivered) continue;
-        write('change', e, e.seq);
-        delivered = e.seq;
-      }
+      for (const e of batch) deliver(e);
     });
 
     req.on('close', () => {
       unsubscribe();
     });
 
-    write('connected', { sessionId, since });
+    write('connected', { sessionId, since, epoch: changes.epoch(sessionId) ?? clientEpoch });
+
+    const fromWorker = async (from: number) => {
+      const response = await sessionManager.sendCommand(sessionId, {
+        id: randomUUID(),
+        command: 'get_changes',
+        params: { since: from, limit: 10000 },
+      } as WorkerCommand);
+      return (response.result ?? {}) as { events?: ChangeEvent[]; head?: number; epoch?: string };
+    };
 
     try {
       let backlog: ChangeEvent[];
-      if (changes.hasFrom(sessionId, since)) {
+      const buffered = changes.epoch(sessionId);
+      if (buffered !== undefined && (clientEpoch === undefined || clientEpoch === buffered)
+          && changes.hasFrom(sessionId, since)) {
         backlog = changes.since(sessionId, since);
+        epoch = buffered;
       } else {
-        const response = await sessionManager.sendCommand(sessionId, {
-          id: randomUUID(),
-          command: 'get_changes',
-          params: { since, limit: 10000 },
-        } as WorkerCommand);
-        const result = response.result as { events?: ChangeEvent[]; head?: number } | undefined;
-        backlog = result?.events ?? [];
-        if (backlog.length === 0 && (result?.head ?? 0) > since) {
-          write('truncated', { since, head: result?.head ?? 0 });
+        let result = await fromWorker(since);
+        const head = result.head ?? 0;
+        const reset = (clientEpoch !== undefined && !!result.epoch && result.epoch !== clientEpoch) || head < since;
+        if (reset) {
+          write('reset', { epoch: result.epoch, previousEpoch: clientEpoch, head });
+          since = 0;
+          delivered = 0;
+          result = await fromWorker(0);
+        }
+        if (result.epoch) epoch = result.epoch;
+        backlog = result.events ?? [];
+        // Sequences are dense within an epoch, so a backlog that does not start right after
+        // `since` lost the events in between (rotated away).
+        const first = backlog[0]?.seq;
+        if ((backlog.length === 0 && (result.head ?? 0) > since) || (first !== undefined && first > since + 1)) {
+          write('truncated', { since, head: result.head ?? 0, epoch: result.epoch });
         }
       }
       for (const e of backlog) {
@@ -680,11 +714,7 @@ export async function createServer(options: ServerOptions): Promise<{
 
     // Anything that arrived while the backlog was being fetched may already be in it.
     // Sequence numbers make that cheap to settle without tracking identity.
-    for (const e of pending) {
-      if (e.seq <= delivered) continue;
-      write('change', e, e.seq);
-      delivered = e.seq;
-    }
+    for (const e of pending) deliver(e);
     pending.length = 0;
     live = true;
 

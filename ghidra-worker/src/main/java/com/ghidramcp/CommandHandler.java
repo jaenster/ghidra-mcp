@@ -2324,6 +2324,7 @@ public class CommandHandler {
         if (journal == null) {
             result.add("events", new com.google.gson.JsonArray());
             result.addProperty("head", 0);
+            result.addProperty("epoch", "");
             return result;
         }
 
@@ -2339,6 +2340,7 @@ public class CommandHandler {
         }
         result.add("events", events);
         result.addProperty("head", journal.head());
+        result.addProperty("epoch", journal.epoch());
         return result;
     }
 
@@ -2386,7 +2388,10 @@ public class CommandHandler {
         result.addProperty("programVersion", program.getDomainFile().getVersion());
         result.addProperty("modificationNumber", program.getModificationNumber());
         ChangeJournal journal = engine.getContext().getChangeJournal();
-        if (journal != null) result.addProperty("changeSeq", journal.head());
+        if (journal != null) {
+            result.addProperty("changeSeq", journal.head());
+            result.addProperty("changeEpoch", journal.epoch());
+        }
         if (kinds.contains("functions")) result.add("functions", gson.toJsonTree(hasher.functions(only)));
         if (kinds.contains("types")) result.add("types", gson.toJsonTree(hasher.dataTypes()));
         if (kinds.contains("globals")) result.add("globals", gson.toJsonTree(hasher.globals(only)));

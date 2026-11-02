@@ -82,6 +82,7 @@ public class ChangeJournal implements DomainObjectListener, TransactionListener 
     public static final String KIND_CODE_ADDED = "code.added";
     public static final String KIND_CODE_REMOVED = "code.removed";
     public static final String KIND_RESTORED = "restored";
+    public static final String KIND_VERSION_COMMITTED = "version.committed";
 
     /** Targets say which index of the consumer's model a key addresses. */
     public static final String TARGET_FUNCTION = "function";
@@ -93,6 +94,7 @@ public class ChangeJournal implements DomainObjectListener, TransactionListener 
 
     /** One journal entry. Field names are the wire format - see protocol.ts ChangeEvent. */
     public static class ChangeEvent {
+        public String epoch;
         public long seq;
         public long mod;
         public long ts;
@@ -103,6 +105,8 @@ public class ChangeJournal implements DomainObjectListener, TransactionListener 
         public String newName;
         public Long txId;
         public String txDescription;
+        /** The server version a version.committed event reached. */
+        public Integer version;
     }
 
     private final Logger log;
@@ -111,6 +115,7 @@ public class ChangeJournal implements DomainObjectListener, TransactionListener 
     private Program program;
     private Path journalPath;
     private long seq = 0;
+    private String epoch = newEpoch();
 
     /** Most recently ended transaction, used to stamp the next flushed batch. */
     private volatile long lastTxId = -1;
@@ -126,12 +131,13 @@ public class ChangeJournal implements DomainObjectListener, TransactionListener 
         this.program = program;
         this.journalPath = resolveJournalPath(program);
         this.seq = readTailSeq();
+        this.epoch = resolveEpoch();
         program.addListener(this);
         if (program instanceof DomainObjectAdapterDB db) {
             db.addTransactionListener(this);
         }
         log.info("ChangeJournal attached to " + program.getName() + " at seq " + seq
-            + " (" + journalPath + ")");
+            + " epoch " + epoch + " (" + journalPath + ")");
     }
 
     public void detach() {
@@ -152,6 +158,31 @@ public class ChangeJournal implements DomainObjectListener, TransactionListener 
     /** The highest sequence number written. A consumer resumes from here. */
     public synchronized long head() {
         return seq;
+    }
+
+    /**
+     * Identity of this journal's sequence space. Sequence numbers are only comparable within
+     * one epoch: a journal that was lost (its directory went with the worker) starts again
+     * at 1 under a new epoch, and a consumer holding seq N from the old one must notice
+     * rather than skip everything up to N.
+     */
+    public synchronized String epoch() {
+        return epoch;
+    }
+
+    /**
+     * Record a successful check-in. Nothing in Ghidra's change records says that the
+     * session's work is now a server version, and a consumer that commits its own output
+     * only for checked-in states needs exactly that boundary.
+     */
+    public void recordCommitted(int version) {
+        if (program == null) return;
+        ChangeEvent ev = new ChangeEvent();
+        ev.kind = KIND_VERSION_COMMITTED;
+        ev.target = TARGET_PROGRAM;
+        ev.key = "*";
+        ev.version = version;
+        append(List.of(ev));
     }
 
     // ============== Listening ==============
@@ -377,6 +408,7 @@ public class ChangeJournal implements DomainObjectListener, TransactionListener 
 
         StringBuilder sb = new StringBuilder();
         for (ChangeEvent e : events) {
+            e.epoch = epoch;
             e.seq = ++seq;
             e.mod = mod;
             e.ts = now;
@@ -475,6 +507,33 @@ public class ChangeJournal implements DomainObjectListener, TransactionListener 
             log.warn("ChangeJournal could not read tail sequence: " + ex.getMessage());
         }
         return max;
+    }
+
+    private static String newEpoch() {
+        return java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 16);
+    }
+
+    /**
+     * The epoch lives beside the journal and exactly as long as it: an existing journal keeps
+     * its epoch (sequences continue), a missing one gets a fresh epoch, written now so a
+     * restart over the same file agrees.
+     */
+    private String resolveEpoch() {
+        if (journalPath == null) return newEpoch();
+        Path epochPath = journalPath.resolveSibling(journalPath.getFileName() + ".epoch");
+        try {
+            if (Files.exists(journalPath) && Files.exists(epochPath)) {
+                String stored = Files.readString(epochPath, StandardCharsets.UTF_8).trim();
+                if (!stored.isEmpty()) return stored;
+            }
+            String fresh = newEpoch();
+            Files.createDirectories(epochPath.getParent());
+            Files.writeString(epochPath, fresh + "\n", StandardCharsets.UTF_8);
+            return fresh;
+        } catch (IOException ex) {
+            log.warn("ChangeJournal could not persist its epoch: " + ex.getMessage());
+            return newEpoch();
+        }
     }
 
     private Path resolveJournalPath(Program program) {

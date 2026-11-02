@@ -1233,8 +1233,14 @@ export interface WorkerError {
  * are diagnostic only: Ghidra flushes change records on a 500 ms timer rather than at
  * commit, so one flush can span several transactions and the stamp is the most recently
  * started one.
+ *
+ * `seq` is only comparable within one `epoch`. A journal that was lost with its worker
+ * starts again at 1 under a new epoch; a consumer seeing a different epoch must treat its
+ * position as void and reconcile, never compare sequence numbers across the two.
  */
 export interface ChangeEvent {
+  /** Identity of the journal's sequence space; absent only from journals written before it. */
+  epoch?: string;
   seq: number;
   mod: number;
   ts: number;
@@ -1246,7 +1252,8 @@ export interface ChangeEvent {
     | 'data.changed'
     | 'ref.added' | 'ref.removed'
     | 'code.added' | 'code.removed'
-    | 'restored';
+    | 'restored'
+    | 'version.committed';
   /** Which index of a consumer's model `key` addresses. */
   target: 'function' | 'global' | 'datatype' | 'program';
   /** Function entry point, global address, or datatype path name. */
@@ -1255,6 +1262,8 @@ export interface ChangeEvent {
   newName?: string;
   txId?: number;
   txDescription?: string;
+  /** For version.committed: the server version the check-in created. */
+  version?: number;
 }
 
 /** Read the durable change journal. `since` is exclusive. */
@@ -1288,6 +1297,8 @@ export interface StateHashesResult {
   modificationNumber: number;
   /** Journal head when the hashes were taken: every event up to here is reflected. */
   changeSeq?: number;
+  /** Epoch of the journal changeSeq belongs to. */
+  changeEpoch?: string;
   functions?: Record<string, string>;
   types?: Record<string, string>;
   globals?: Record<string, string>;
@@ -1373,7 +1384,7 @@ export type CommandResultMap = {
   'get_dirty_symbols': { functions: string[]; dataTypes: string[]; globals: string[]; lastCleanVersion: number };
   'mark_clean': { version: number };
   // Change journal
-  'get_changes': { events: ChangeEvent[]; head: number };
+  'get_changes': { events: ChangeEvent[]; head: number; epoch: string };
   'get_state_hashes': StateHashesResult;
 };
 

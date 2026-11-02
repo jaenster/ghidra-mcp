@@ -545,6 +545,7 @@ public class ProjectOps {
         if (!df.isVersioned()) {
             log.info("Adding to version control: " + df.getPathname());
             df.addToVersionControl(message, true /*keepCheckedOut*/, monitor);
+            recordCommitted(df.getVersion());
             return "Added to version control: " + df.getPathname() + " (version " + df.getVersion() + ")";
         }
 
@@ -570,7 +571,21 @@ public class ProjectOps {
         df.checkin(handler, monitor);
         int version = df.getVersion();
         log.info("Check-in complete: " + df.getPathname() + " version=" + version);
+        recordCommitted(version);
         return "Committed " + df.getPathname() + " as version " + version;
+    }
+
+    private void recordCommitted(int version) {
+        try {
+            // A check-in reloads the database, which Ghidra reports as RESTORED on its event
+            // timer. Deliver that first, so the boundary is the last thing the check-in wrote.
+            var program = ctx.getProgram();
+            if (program != null) program.flushEvents();
+            var journal = ctx.getChangeJournal();
+            if (journal != null) journal.recordCommitted(version);
+        } catch (Exception ex) {
+            ctx.getLog().warn("version.committed event failed: " + ex.getMessage());
+        }
     }
 
     // ============== Save / Close ==============
